@@ -160,27 +160,27 @@ class Native {
 
 	// --- shapes ------------------------------------------------------------
 
-	/** Eight f32: radius, centre, then density, friction, restitution, rolling. **/
+	/** Nine f32: radius, centre, then the five settings. **/
 	public static function shape_sphere(w:WorldPtr, body:Int, v:hl.Bytes):Int {
 		return -1;
 	}
 
-	/** Eleven f32: the two ends, the radius, then the four settings. **/
+	/** Twelve f32: the two ends, the radius, then the five settings. **/
 	public static function shape_capsule(w:WorldPtr, body:Int, v:hl.Bytes):Int {
 		return -1;
 	}
 
-	/** Fourteen f32: half extents, offset, rotation, then the four settings. **/
+	/** Fifteen f32: half extents, offset, rotation, then the five settings. **/
 	public static function shape_box(w:WorldPtr, body:Int, v:hl.Bytes):Int {
 		return -1;
 	}
 
-	/** Four f32: the settings. **/
+	/** Five f32: the settings. **/
 	public static function shape_hull(w:WorldPtr, body:Int, hull:HullPtr, v:hl.Bytes):Int {
 		return -1;
 	}
 
-	/** Seven f32: the scale on each axis, then the settings. **/
+	/** Eight f32: the scale on each axis, then the settings. **/
 	public static function shape_mesh(w:WorldPtr, body:Int, mesh:MeshPtr, v:hl.Bytes):Int {
 		return -1;
 	}
@@ -199,7 +199,12 @@ class Native {
 	public static function shape_set_density(w:WorldPtr, id:Int, density:Float,
 			updateMass:Bool):Void {}
 
-	public static function shape_set_sensor(w:WorldPtr, id:Int, on:Bool):Void {}
+	/** Only for a shape already made as one; it cannot turn a solid into a sensor. **/
+	public static function shape_report_sensor(w:WorldPtr, id:Int, on:Bool):Void {}
+
+	public static function shape_is_sensor(w:WorldPtr, id:Int):Bool {
+		return false;
+	}
 
 	public static function shape_report_contacts(w:WorldPtr, id:Int, on:Bool):Void {}
 
@@ -211,6 +216,29 @@ class Native {
 	/** Six f32: the wind, the drag, the lift, the top speed it acts up to. **/
 	public static function shape_wind(w:WorldPtr, id:Int, v:hl.Bytes):Void {}
 
+
+
+	// --- events ------------------------------------------------------------
+
+	/** Twelve words an event: kind, two shapes, two bodies, point, normal, speed. **/
+	public static function events_contacts(w:WorldPtr, out:hl.Bytes, max:Int):Int {
+		return 0;
+	}
+
+	/** Four words: kind, the sensor's shape, the visitor's shape, its body. **/
+	public static function events_sensors(w:WorldPtr, out:hl.Bytes, max:Int):Int {
+		return 0;
+	}
+
+	/** Nine words: the body, where it is, how it is turned, whether it fell asleep. **/
+	public static function events_moved(w:WorldPtr, out:hl.Bytes, max:Int):Int {
+		return 0;
+	}
+
+	/** One word each: the joint that reported. **/
+	public static function events_joints(w:WorldPtr, out:hl.Bytes, max:Int):Int {
+		return 0;
+	}
 
 	// --- joints ------------------------------------------------------------
 

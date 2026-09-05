@@ -34,6 +34,9 @@ class Check {
 		joints();
 		ropes();
 		filters();
+		events();
+		sensors();
+		moving();
 		Sys.println(failures == 0 ? "all good" : '$failures failed');
 		Sys.exit(failures);
 	}
@@ -276,6 +279,114 @@ class Check {
 		for (n in 0...120) world.step(STEP);
 		d.read();
 		is("and without one they push apart", d.x > 20.5 ? 1 : 0, 1);
+
+		world.dispose();
+	}
+
+	/**
+		Contacts and sensors, which are off until asked for - so half of
+		what this checks is that they stay quiet when they were not.
+	**/
+	static function events() {
+		final world = level();
+		final floor = world.bodies[0];
+		floor.shapes[0].reportContacts();
+		floor.shapes[0].reportHits();
+
+		// Nothing has been dropped yet, so nothing should be reported.
+		world.step(STEP);
+		is("a quiet world reports nothing", world.contacts(), 0);
+
+		final crate = world.addBox(0.5, 0.5, 0.5, 0, 0, 2);
+		crate.shapes[0].reportContacts();
+		crate.shapes[0].reportHits();
+
+		// Long enough to fall two metres and land.
+		var began = 0;
+		var hits = 0;
+		var speed = 0.0;
+		for (n in 0...90) {
+			world.step(STEP);
+			for (i in 0...world.contacts()) {
+				world.contact(i);
+				switch (world.contactKind) {
+					case Began: began++;
+					case Hit:
+						hits++;
+						if (world.contactSpeed > speed) speed = world.contactSpeed;
+					case Ended:
+				}
+			}
+		}
+		is("landing reports a contact", began > 0 ? 1 : 0, 1);
+		is("and reports the impact", hits > 0 ? 1 : 0, 1);
+		// Falling 1.5 m under 9.81 arrives at about 5.4 m/s.
+		is("at about the speed it was going", speed > 3 && speed < 7 ? 1 : 0, 1);
+
+		world.dispose();
+	}
+
+	/** A sensor should notice what walks through it and not stop it. **/
+	static function sensors() {
+		final world = level();
+
+		// A shape is made a sensor or it is not; there is no switching one
+		// afterwards, so the flag goes on before the shape is built.
+		world.sensor = true;
+		final gate = world.add(Static, 0, 0, 3);
+		gate.box(1, 1, 0.2);
+		world.sensor = false;
+
+		final crate = world.addBox(0.3, 0.3, 0.3, 0, 0, 6);
+		// The visitor has to be visible to sensors as well as the sensor
+		// being one: Box3D wants the flag on both sides.
+		crate.shapes[0].reportSensor();
+
+		var entered = 0;
+		var left = 0;
+		for (n in 0...180) {
+			world.step(STEP);
+			for (i in 0...world.sensors()) {
+				world.sensorEvent(i);
+				if (world.sensorEntered) entered++ else left++;
+			}
+		}
+		is("a sensor notices what enters", entered, 1);
+		is("and notices it leave", left, 1);
+
+		crate.read();
+		near("and does not stop it falling", crate.z, 0.3, 0.05);
+
+		world.dispose();
+	}
+
+	/**
+		The fast sync: only the bodies that moved, out of the events, and
+		the same answer as reading every body one at a time.
+	**/
+	static function moving() {
+		final world = level();
+		final crate = world.addBox(0.5, 0.5, 0.5, 0, 0, 4);
+		final still = world.addBox(0.5, 0.5, 0.5, 10, 0, 0.5, Static);
+
+		// While it falls it should be reported, and the fields it fills
+		// should match what asking the body itself says.
+		for (n in 0...30) world.update(STEP);
+		final fromEvents = crate.z;
+		crate.read();
+		near("the fast sync agrees with the slow one", fromEvents, crate.z, 0.0001);
+		is("and a body that fell has moved", crate.z < 3.9 ? 1 : 0, 1);
+
+		// Once everything has settled nothing moves, so nothing is
+		// reported, and the positions stay where they were.
+		for (n in 0...300) world.update(STEP);
+		final resting = crate.z;
+		world.update(STEP);
+		near("a settled world reports nothing and keeps its places", crate.z, resting, 0.0001);
+		is("with everything asleep", world.activeCount, 0);
+
+		// A static body was never in the list and is still where it was put.
+		near("and a static body stays where it was put", still.z, 0.5, 0.0001);
 
 		world.dispose();
 	}

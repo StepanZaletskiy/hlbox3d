@@ -64,14 +64,24 @@ class Shape {
 	}
 
 	/**
-		A shape that is passed through but noticed: no collision, and an
-		entry in the sensor events for whatever overlaps it. A trigger, a
-		doorway, the volume a room's air occupies.
+		Whether this shape has anything to do with sensors: whether a sensor
+		reports it, and whether it reports as one if it is one. Box3D wants
+		the flag on both sides of the pair, so a sensor that notices nothing
+		is usually a visitor that was never told to be noticed.
+
+		This cannot make a shape into a sensor. Box3D decides that when the
+		shape is made - set `World.sensor` before making it instead.
 	**/
-	public function sensor(on = true):Shape {
-		Native.shape_set_sensor(body.world.w, id, on);
+	public function reportSensor(on = true):Shape {
+		Native.shape_report_sensor(body.world.w, id, on);
 		return this;
 	}
+
+	/** Whether it was made as a sensor: passed through, but noticed. **/
+	public var isSensor(get, never):Bool;
+
+	function get_isSensor():Bool
+		return Native.shape_is_sensor(body.world.w, id);
 
 	/**
 		Whether this shape's touches are worth reporting. Off by default

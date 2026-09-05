@@ -73,11 +73,23 @@ class World {
 		A density of 1000 is water, and about right for anything wooden or
 		full. Friction of 0.6 is dry and ordinary. Nothing bounces and
 		nothing resists rolling until told to.
+
+		`sensor` is here rather than being a method on Shape because Box3D
+		decides at creation: a shape is made a sensor or it is not, and
+		there is no turning a solid one into a sensor afterwards. Set it,
+		make the shape, set it back.
+
+		And a sensor on its own notices nothing. Box3D wants the flag on
+		both sides of the pair, so whatever should be detected needs
+		`Shape.reportSensor` as well - which is a runtime call, unlike this
+		one. Two opt-ins for one feature is a trap, and this is the half
+		people forget.
 	**/
 	public var density = 1000.0;
 	public var friction = 0.6;
 	public var restitution = 0.0;
 	public var rolling = 0.0;
+	public var sensor = false;
 
 	/**
 		`threads` at 1 is the calling thread alone, which is where to start:
@@ -163,13 +175,14 @@ class World {
 		return body;
 	}
 
-	/** Writes the four shape settings into a buffer at `at`, in floats. **/
+	/** Writes the five shape settings into a buffer at `at`, in floats. **/
 	@:allow(box3d)
 	function settings(b:hl.Bytes, at:Int) {
 		b.setF32(at * 4, density);
 		b.setF32((at + 1) * 4, friction);
 		b.setF32((at + 2) * 4, restitution);
 		b.setF32((at + 3) * 4, rolling);
+		b.setF32((at + 4) * 4, sensor ? 1 : 0);
 	}
 
 	@:allow(box3d)
@@ -199,14 +212,58 @@ class World {
 	}
 
 	/**
-		Reads every body back and moves whatever each one drives.
+		Moves whatever the bodies drive to where the bodies now are.
 
-		Bodies that are asleep are read too. Skipping them would save
-		little - a read is a handful of floats out of a buffer - and would
-		cost the one frame where something is woken by a neighbour and
-		nobody notices.
+		Only the ones that moved. Box3D already knows which those are - it
+		had to, to move them - and says so, so this costs what is happening
+		rather than what exists. A station is mostly things lying still;
+		walking all of them every frame to find the four that shifted is
+		the kind of loop that is fine at a hundred bodies and is the frame
+		at ten thousand.
+
+		A body that is not in the list did not move, and whatever draws it
+		is already in the right place. Its own `x, y, z` are equally still
+		correct from the last time it did.
 	**/
 	public function sync() {
+		// Room for every body to have moved, because on the first step
+		// after a level loads they all do.
+		final want = bodies.length * 9 * 4;
+		if (want > moveRoom) {
+			moveRoom = want < 1024 ? 1024 : want;
+			moves = new hl.Bytes(moveRoom);
+		}
+		final n = Native.events_moved(w, moves, bodies.length);
+		for (i in 0...n) {
+			final at = i * 9 * 4;
+			final body = bodyOf(moves.getI32(at));
+			if (body == null) continue;
+			body.x = moves.getF32(at + 4);
+			body.y = moves.getF32(at + 8);
+			body.z = moves.getF32(at + 12);
+			body.qx = moves.getF32(at + 16);
+			body.qy = moves.getF32(at + 20);
+			body.qz = moves.getF32(at + 24);
+			body.qw = moves.getF32(at + 28);
+			#if !box3d_no_heaps
+			final o = body.object;
+			if (o == null) continue;
+			o.setPosition(body.x, body.y, body.z);
+			quat.set(body.qx, body.qy, body.qz, body.qw);
+			o.setRotationQuat(quat);
+			#end
+		}
+	}
+
+	/**
+		The same, the slow way: every body read one at a time.
+
+		Here for the case `sync` cannot cover - a body moved by hand
+		between steps, which the solver never heard about and so never
+		reported - and as something to compare against when the fast one
+		looks wrong.
+	**/
+	public function syncAll() {
 		for (body in bodies) {
 			body.read();
 			#if !box3d_no_heaps
@@ -218,6 +275,9 @@ class World {
 			#end
 		}
 	}
+
+	var moves = new hl.Bytes(1024);
+	var moveRoom = 1024;
 
 	#if !box3d_no_heaps
 	/** One quaternion for the whole sync, so that a frame allocates nothing. **/
@@ -521,6 +581,130 @@ class World {
 	@:allow(box3d)
 	function forgetJoint(j:Joint) {
 		joints.remove(j);
+	}
+
+	// --- what happened -----------------------------------------------------
+
+	/*
+		Events are read after a step, out of buffers Box3D fills and keeps
+		until the next one. Nothing calls back into the game: it asks, once
+		a frame, for the kinds it cares about.
+
+		Almost all of it is off until asked for. A shape reports its
+		touches only if `Shape.reportContacts` was set on it, and its
+		impacts only with `reportHits`. That is deliberate and it is why
+		these usually come back empty: a level where everything reports
+		everything spends the frame filling a buffer nobody reads.
+	*/
+
+	/** What kind of thing happened to a contact. **/
+	public var contactKind(default, null):Contact = Began;
+
+	/** The two shapes, and the two bodies they belong to. **/
+	public var contactShapeA(default, null):Shape;
+	public var contactShapeB(default, null):Shape;
+	public var contactBodyA(default, null):Body;
+	public var contactBodyB(default, null):Body;
+
+	/** Where the two met, and the normal there. Hits only. **/
+	public var contactX = 0.0;
+	public var contactY = 0.0;
+	public var contactZ = 0.0;
+	public var contactNx = 0.0;
+	public var contactNy = 0.0;
+	public var contactNz = 0.0;
+
+	/**
+		How fast the two were closing when they met, in metres a second.
+		Hits only, and this is the number a sound is picked by.
+	**/
+	public var contactSpeed = 0.0;
+
+	/** Whether something entered a sensor or left it. **/
+	public var sensorEntered(default, null) = true;
+
+	/** The sensor, what walked into it, and whose it was. **/
+	public var sensorShape(default, null):Shape;
+	public var visitorShape(default, null):Shape;
+	public var visitorBody(default, null):Body;
+
+	static inline var MAX_EVENTS = 256;
+
+	final eventBuffer = new hl.Bytes(MAX_EVENTS * 12 * 4);
+
+	/**
+		How many contacts began, ended or hit during the last step, up to
+		two hundred and fifty-six. `contact(i)` then fills the fields for
+		one of them.
+
+		```haxe
+		for (i in 0...world.contacts()) {
+			world.contact(i);
+			if (world.contactKind == Hit && world.contactSpeed > 4)
+				thud(world.contactX, world.contactY, world.contactZ);
+		}
+		```
+	**/
+	public function contacts():Int {
+		return Native.events_contacts(w, eventBuffer, MAX_EVENTS);
+	}
+
+	/** Fills the contact fields from one of what `contacts` counted. **/
+	public function contact(i:Int) {
+		final at = i * 12 * 4;
+		contactKind = switch (eventBuffer.getI32(at)) {
+			case 0: Began;
+			case 1: Ended;
+			default: Hit;
+		}
+		contactShapeA = shapeOf(eventBuffer.getI32(at + 4));
+		contactShapeB = shapeOf(eventBuffer.getI32(at + 8));
+		contactBodyA = bodyOf(eventBuffer.getI32(at + 12));
+		contactBodyB = bodyOf(eventBuffer.getI32(at + 16));
+		contactX = eventBuffer.getF32(at + 20);
+		contactY = eventBuffer.getF32(at + 24);
+		contactZ = eventBuffer.getF32(at + 28);
+		contactNx = eventBuffer.getF32(at + 32);
+		contactNy = eventBuffer.getF32(at + 36);
+		contactNz = eventBuffer.getF32(at + 40);
+		contactSpeed = eventBuffer.getF32(at + 44);
+	}
+
+	/**
+		How many things entered or left a sensor during the last step.
+		`sensorEvent(i)` then fills the fields for one.
+
+		A shape that left is often a shape that was destroyed, so
+		`visitorBody` is null on the way out. A game that needs to know
+		whose it was keeps its own note on the way in.
+	**/
+	public function sensors():Int {
+		return Native.events_sensors(w, eventBuffer, MAX_EVENTS);
+	}
+
+	/** Fills the sensor fields from one of what `sensors` counted. **/
+	public function sensorEvent(i:Int) {
+		final at = i * 4 * 4;
+		sensorEntered = eventBuffer.getI32(at) == 0;
+		sensorShape = shapeOf(eventBuffer.getI32(at + 4));
+		visitorShape = shapeOf(eventBuffer.getI32(at + 8));
+		visitorBody = bodyOf(eventBuffer.getI32(at + 12));
+	}
+
+	/**
+		Joints carrying more than they were told to report, as a list of
+		them. This is how a game hears that something is being pulled apart
+		before it comes apart.
+	**/
+	public function strainedJoints():Int {
+		return Native.events_joints(w, eventBuffer, MAX_EVENTS);
+	}
+
+	/** One of the joints `strainedJoints` counted. **/
+	public function strainedJoint(i:Int):Joint {
+		final id = eventBuffer.getI32(i * 4);
+		for (j in joints) if (j.id == id) return j;
+		return null;
 	}
 
 	// --- asking ------------------------------------------------------------

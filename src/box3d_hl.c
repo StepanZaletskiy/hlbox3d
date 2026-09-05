@@ -687,8 +687,15 @@ DEFINE_PRIM(_VOID, world_mass_from_shapes, _WORLD _I32);
 
 	Every maker below takes the same tail of settings so that the Haxe
 	side can fill one buffer and not think about it: the density the mass
-	is worked out from, then friction, restitution and rolling
-	resistance. A density of zero leaves Box3D's own.
+	is worked out from, then friction, restitution, rolling resistance,
+	and whether the shape is a sensor. A density of zero leaves Box3D's
+	own.
+
+	The sensor flag has to be here rather than in a setter because Box3D
+	decides at creation: a shape is made a sensor or it is not, and
+	b3Shape_EnableSensorEvents only says whether an existing sensor
+	reports. Setting that on a solid shape looks like it worked and
+	changes nothing.
 
 	The shape's own number comes back. It is wanted for changing the
 	material later, for reading which shape a ray hit, and for sensors.
@@ -700,6 +707,10 @@ static b3ShapeDef shape_def(vbyte *v, int i) {
 	def.baseMaterial.friction = ff(v, i + 1);
 	def.baseMaterial.restitution = ff(v, i + 2);
 	def.baseMaterial.rollingResistance = ff(v, i + 3);
+	if( ff(v, i + 4) != 0.0f ) {
+		def.isSensor = true;
+		def.enableSensorEvents = true;
+	}
 	return def;
 }
 
@@ -834,14 +845,19 @@ HL_PRIM void HL_NAME(shape_set_density)(hb_world *w, int id, double density, boo
 }
 
 /*
-	A shape that is walked through but noticed: no collision, and an
-	entry in the sensor events when something overlaps it. A trigger, a
-	doorway, the volume a room's air occupies.
+	Whether a shape that is already a sensor reports what walks through
+	it. This cannot make a shape into a sensor - Box3D decides that when
+	the shape is made - and on a solid shape it does nothing at all.
 */
-HL_PRIM void HL_NAME(shape_set_sensor)(hb_world *w, int id, bool on) {
+HL_PRIM void HL_NAME(shape_report_sensor)(hb_world *w, int id, bool on) {
 	b3ShapeId s = shape_of(w, id);
 	if( !shape_ok(s) ) return;
 	b3Shape_EnableSensorEvents(s, on);
+}
+
+HL_PRIM bool HL_NAME(shape_is_sensor)(hb_world *w, int id) {
+	b3ShapeId s = shape_of(w, id);
+	return shape_ok(s) && b3Shape_IsSensor(s);
 }
 
 /*
@@ -984,7 +1000,8 @@ DEFINE_PRIM(_I32, shape_body, _WORLD _I32);
 DEFINE_PRIM(_VOID, shape_material, _WORLD _I32 _F64 _F64 _F64);
 DEFINE_PRIM(_VOID, shape_conveyor, _WORLD _I32 _F64 _F64 _F64);
 DEFINE_PRIM(_VOID, shape_set_density, _WORLD _I32 _F64 _BOOL);
-DEFINE_PRIM(_VOID, shape_set_sensor, _WORLD _I32 _BOOL);
+DEFINE_PRIM(_VOID, shape_report_sensor, _WORLD _I32 _BOOL);
+DEFINE_PRIM(_BOOL, shape_is_sensor, _WORLD _I32);
 DEFINE_PRIM(_VOID, shape_report_contacts, _WORLD _I32 _BOOL);
 DEFINE_PRIM(_VOID, shape_report_hits, _WORLD _I32 _BOOL);
 DEFINE_PRIM(_VOID, shape_filter, _WORLD _I32 _F64 _F64 _I32);
@@ -1807,3 +1824,163 @@ HL_PRIM void HL_NAME(joint_frames)(hb_world *w, int a, int b, vbyte *v, vbyte *o
 }
 
 DEFINE_PRIM(_VOID, joint_frames, _WORLD _I32 _I32 _BYTES _BYTES);
+
+/* ---- events --------------------------------------------------------- */
+
+/*
+	What happened during the last step, read afterwards.
+
+	Box3D collects these into arrays of its own and keeps them until the
+	next step, which suits the first rule at the top of this file exactly:
+	nothing has to call into Haxe, and the game asks once a frame for what
+	it cares about.
+
+	Each of these copies into a buffer the caller sized, returns how many
+	fitted, and turns Box3D's handles into our numbers on the way. An
+	event about a shape that has since been destroyed comes back with -1
+	for it, which is the honest answer and not an error.
+*/
+
+/*
+	Contacts starting, contacts ending, and contacts hard enough to be
+	worth a noise. Twelve words each:
+
+		0  what kind: 0 began, 1 ended, 2 a hit
+		1  shape A          2  shape B
+		3  body A           4  body B
+		5..7   where it hit          (hits only)
+		8..10  the normal there      (hits only)
+		11     how fast they closed  (hits only)
+
+	Nothing is reported for a shape that was not asked to report: see
+	shape_report_contacts and shape_report_hits. That is deliberate, and
+	it is why this is usually empty.
+*/
+HL_PRIM int HL_NAME(events_contacts)(hb_world *w, vbyte *out, int max) {
+	b3ContactEvents e = b3World_GetContactEvents(w->id);
+	int n = 0;
+	for( int i = 0; i < e.beginCount && n < max; i++, n++ ) {
+		vbyte *o = out + n * 12 * 4;
+		memset(o, 0, 12 * 4);
+		put_i(o, 0, 0);
+		put_i(o, 1, our_shape(e.beginEvents[i].shapeIdA));
+		put_i(o, 2, our_shape(e.beginEvents[i].shapeIdB));
+		put_i(o, 3, our_body(b3Shape_GetBody(e.beginEvents[i].shapeIdA)));
+		put_i(o, 4, our_body(b3Shape_GetBody(e.beginEvents[i].shapeIdB)));
+	}
+	for( int i = 0; i < e.endCount && n < max; i++, n++ ) {
+		vbyte *o = out + n * 12 * 4;
+		memset(o, 0, 12 * 4);
+		put_i(o, 0, 1);
+		put_i(o, 1, our_shape(e.endEvents[i].shapeIdA));
+		put_i(o, 2, our_shape(e.endEvents[i].shapeIdB));
+		/*
+			A contact ends when one of the shapes is destroyed, so asking
+			the shape for its body here would be asking a dead handle. The
+			numbers above answer -1 in that case and the bodies are left at
+			zero; a game that cares keeps its own note of which body a
+			shape belonged to.
+		*/
+	}
+	for( int i = 0; i < e.hitCount && n < max; i++, n++ ) {
+		vbyte *o = out + n * 12 * 4;
+		put_i(o, 0, 2);
+		put_i(o, 1, our_shape(e.hitEvents[i].shapeIdA));
+		put_i(o, 2, our_shape(e.hitEvents[i].shapeIdB));
+		put_i(o, 3, our_body(b3Shape_GetBody(e.hitEvents[i].shapeIdA)));
+		put_i(o, 4, our_body(b3Shape_GetBody(e.hitEvents[i].shapeIdB)));
+		put3(o, 5, (b3Vec3){ e.hitEvents[i].point.x, e.hitEvents[i].point.y,
+			e.hitEvents[i].point.z });
+		put3(o, 8, e.hitEvents[i].normal);
+		put(o, 11, e.hitEvents[i].approachSpeed);
+	}
+	return n;
+}
+
+/*
+	Things entering and leaving sensors. Four words each: what kind - 0
+	entered, 1 left - the sensor's shape, the visitor's shape, and the
+	visitor's body.
+
+	This is a trigger, a doorway, a pressure plate, and the volume a
+	room's air fills.
+*/
+HL_PRIM int HL_NAME(events_sensors)(hb_world *w, vbyte *out, int max) {
+	b3SensorEvents e = b3World_GetSensorEvents(w->id);
+	int n = 0;
+	for( int i = 0; i < e.beginCount && n < max; i++, n++ ) {
+		vbyte *o = out + n * 4 * 4;
+		put_i(o, 0, 0);
+		put_i(o, 1, our_shape(e.beginEvents[i].sensorShapeId));
+		put_i(o, 2, our_shape(e.beginEvents[i].visitorShapeId));
+		put_i(o, 3, our_body(b3Shape_GetBody(e.beginEvents[i].visitorShapeId)));
+	}
+	for( int i = 0; i < e.endCount && n < max; i++, n++ ) {
+		vbyte *o = out + n * 4 * 4;
+		put_i(o, 0, 1);
+		put_i(o, 1, our_shape(e.endEvents[i].sensorShapeId));
+		put_i(o, 2, our_shape(e.endEvents[i].visitorShapeId));
+		put_i(o, 3, NO_SLOT);
+	}
+	return n;
+}
+
+/*
+	Which bodies moved during the step, and where they ended up.
+
+	This is the one worth building a game loop around. A station is mostly
+	things lying still: reading every body every frame to move its model
+	is work proportional to how much there is, when what matters is how
+	much of it is doing anything. Box3D already knows which bodies moved -
+	it had to, to move them - so it says.
+
+	Nine words each: the body, where it is, how it is turned, and whether
+	this is the last word from it because it has just gone to sleep.
+
+		0     the body
+		1..3  where it is
+		4..7  how it is turned
+		8     one if it fell asleep this step
+
+	A body that is not in the list did not move, and whatever is drawing
+	it is already in the right place.
+*/
+HL_PRIM int HL_NAME(events_moved)(hb_world *w, vbyte *out, int max) {
+	b3BodyEvents e = b3World_GetBodyEvents(w->id);
+	int n = 0;
+	for( int i = 0; i < e.moveCount && n < max; i++, n++ ) {
+		vbyte *o = out + n * 9 * 4;
+		const b3BodyMoveEvent *m = &e.moveEvents[i];
+		put_i(o, 0, our_body(m->bodyId));
+		put(o, 1, m->transform.p.x);
+		put(o, 2, m->transform.p.y);
+		put(o, 3, m->transform.p.z);
+		put(o, 4, m->transform.q.v.x);
+		put(o, 5, m->transform.q.v.y);
+		put(o, 6, m->transform.q.v.z);
+		put(o, 7, m->transform.q.s);
+		put_i(o, 8, m->fellAsleep ? 1 : 0);
+	}
+	return n;
+}
+
+/*
+	Joints that reported something during the step: one word each, the
+	joint. Box3D raises one when a joint is carrying more than the force
+	or torque it was told to report above, which is how a game hears that
+	something is about to be pulled apart.
+*/
+HL_PRIM int HL_NAME(events_joints)(hb_world *w, vbyte *out, int max) {
+	b3JointEvents e = b3World_GetJointEvents(w->id);
+	int n = 0;
+	for( int i = 0; i < e.count && n < max; i++, n++ ) {
+		intptr_t v = (intptr_t)b3Joint_GetUserData(e.jointEvents[i].jointId);
+		put_i(out, n, v == 0 ? NO_SLOT : (int)(v - 1));
+	}
+	return n;
+}
+
+DEFINE_PRIM(_I32, events_contacts, _WORLD _BYTES _I32);
+DEFINE_PRIM(_I32, events_sensors, _WORLD _BYTES _I32);
+DEFINE_PRIM(_I32, events_moved, _WORLD _BYTES _I32);
+DEFINE_PRIM(_I32, events_joints, _WORLD _BYTES _I32);
