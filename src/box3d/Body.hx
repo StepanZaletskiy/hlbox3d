@@ -26,6 +26,9 @@ class Body {
 
 	public var world(default, null):World;
 
+	/** Static, kinematic or dynamic: what it was made as, or last set to. **/
+	@:allow(box3d) public var motion(default, null):Motion;
+
 	/** Where it was when last read. **/
 	public var x = 0.0;
 	public var y = 0.0;
@@ -424,6 +427,7 @@ class Body {
 	}
 
 	public function setMotion(motion:Motion) {
+		this.motion = motion;
 		Native.world_set_motion_type(world.w, id, motion);
 	}
 

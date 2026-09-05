@@ -134,6 +134,7 @@ class World {
 		final id = Native.world_add_body(w, floats, motion);
 		if (id < 0) throw "box3d: the body could not be made";
 		final body = new Body(this, id);
+		body.motion = motion;
 		body.x = x;
 		body.y = y;
 		body.z = z;

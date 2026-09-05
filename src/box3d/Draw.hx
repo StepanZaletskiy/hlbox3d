@@ -69,6 +69,16 @@ class Draw {
 			final mesh = new h3d.scene.Mesh(poly, material, root);
 			if (material == null) mesh.material.color.setColor(0xFFB9BEC6);
 			mesh.material.mainPass.culling = Back;
+			/*
+				Static things receive shadows but do not cast them. Heaps sizes
+				its one shadow map to fit everything that casts, so a floor
+				forty metres across stretches it until a crate standing on it
+				covers a couple of texels and vanishes into its own shadow -
+				which is what every scene with a floor looked like until this
+				line. The floor loses nothing: there is nothing under it for
+				its shadow to fall on.
+			*/
+			if (b.motion == Static) mesh.material.castShadows = false;
 		}
 		return root;
 	}

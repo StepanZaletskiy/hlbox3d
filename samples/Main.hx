@@ -9,10 +9,8 @@ import box3d.Body;
 	see box3d.Draw for why. Left and right arrows change scene, space
 	restarts it, and the name of the current one is in the corner.
 
-	The camera is set up z-up and right-handed to match the physics,
-	because Heaps' own default is neither and the mismatch turns every
-	scene into a mirror of itself. That is done once, in `init`, and is
-	the only thing here that is about Heaps rather than about physics.
+	The forward renderer and a light are set up once, in `init`, and are
+	the only things here that are about Heaps rather than about physics.
 **/
 class Main extends hxd.App {
 
@@ -33,25 +31,18 @@ class Main extends hxd.App {
 
 	override function init() {
 		/*
-			Physics is z-up and right-handed. Heaps is neither by default:
-			its camera is left-handed and its up is y. A scene built in one
-			and drawn in the other is a mirror image of itself, which is
-			confusing for an afternoon and then wrong for ever - and the
-			first thing it does is light everything from the wrong side, so
-			the tops of things come out black.
+			Heaps is z-up, as the physics is, so nothing has to be turned:
+			a body's position and rotation go straight onto its object.
 		*/
-		s3d.camera.up.set(0, 0, 1);
 		engine.backgroundColor = 0xFF1A1E24;
 		s3d.camera.pos.set(11, -11, 7);
 		s3d.camera.target.set(0, 0, 1.0);
 		/*
 			A depth range the scene actually occupies. Heaps starts a camera
 			two centimetres from its near plane and four kilometres from its
-			far one, which is two hundred thousand to one and spends nearly
-			all of the depth buffer on the first metre. Twenty metres out, a
-			crate and the floor it stands on land in the same depth value and
-			the floor wins: the crate is drawn, and then painted over, and
-			looks like a flat smudge on the ground.
+			far one, which spends nearly all of the depth buffer on the
+			first metre and leaves faces a few metres out fighting over the
+			rest.
 		*/
 		s3d.camera.zNear = 0.5;
 		s3d.camera.zFar = 200;
@@ -68,7 +59,15 @@ class Main extends hxd.App {
 		final lights = new h3d.scene.fwd.LightSystem();
 		lights.ambientLight.set(0.30, 0.31, 0.36);
 		s3d.lightSystem = lights;
-		s3d.renderer = new h3d.scene.fwd.Renderer();
+		final renderer = new h3d.scene.fwd.Renderer();
+		/*
+			Shadows the grey of a cloudy day rather than the black of a
+			cave: the colour is what a shaded pixel is multiplied by, and
+			Heaps starts it at zero, which puts a hole in the floor under
+			everything.
+		*/
+		renderer.shadow.color.set(0.55, 0.57, 0.63);
+		s3d.renderer = renderer;
 
 		final light = new h3d.scene.fwd.DirLight(new h3d.Vector(-0.4, 0.55, -1), s3d);
 		light.enableSpecular = true;
@@ -170,7 +169,18 @@ class Main extends hxd.App {
 		*/
 		if (e.width != SHOT_W || e.height != SHOT_H) e.resize(SHOT_W, SHOT_H);
 
-		if (target == null) target = new h3d.mat.Texture(SHOT_W, SHOT_H, [Target]);
+		if (target == null) {
+			target = new h3d.mat.Texture(SHOT_W, SHOT_H, [Target]);
+			/*
+				A target of its own has no depth buffer unless given one, and
+				without one nothing is tested against anything: whatever is
+				drawn last is what is seen. A convex shape on its own still
+				looks right, because culling hides its far faces, so the
+				mistake only shows once there is a floor - which is then drawn
+				over everything standing on it.
+			*/
+			target.depthBuffer = new h3d.mat.Texture(SHOT_W, SHOT_H, Depth24Stencil8);
+		}
 		e.pushTarget(target);
 		// A target is not cleared to the engine background: that only
 		// happens for the window. Without this the picture is whatever the
