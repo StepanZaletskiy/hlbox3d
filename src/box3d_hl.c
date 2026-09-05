@@ -25,13 +25,17 @@
 	index into an array of theirs. One array lookup per call, and the
 	same table gives us a validity check of our own.
 */
+/*
+	Before hl.h, which only defines HL_NAME if nobody else has: after it,
+	the define is a redefinition and the prims come out under the wrong
+	names.
+*/
+#define HL_NAME(n) box3d_##n
 #include <hl.h>
 #include <box3d/box3d.h>
 #include <math.h>
 #include <stdlib.h>
 #include <string.h>
-
-#define HL_NAME(n) box3d_##n
 
 #define _WORLD _ABSTRACT(hb_world)
 

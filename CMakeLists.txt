@@ -63,6 +63,14 @@ endif()
 
 add_subdirectory(vendor/box3d)
 
+# Box3D sets CMAKE_MSVC_RUNTIME_LIBRARY to the static CRT in its own
+# CMakeLists, which shadows the cache entry above inside its directory.
+# A module that mixes the two CRTs links with a warning and then has two
+# heaps in it, so the target is put back on the DLL runtime by hand.
+if(MSVC)
+	set_property(TARGET box3d PROPERTY MSVC_RUNTIME_LIBRARY "MultiThreadedDLL")
+endif()
+
 add_library(box3d_hl MODULE src/box3d_hl.c)
 
 # A .hdll is loaded by name, so no lib prefix and a fixed suffix. And the
