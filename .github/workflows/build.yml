@@ -1,0 +1,209 @@
+# Builds box3d.hdll on both systems the game ships to and runs the bench on
+# each, so a change to the shim is tried where it will be used, not only
+# where it is cheapest.
+#
+#   linux    the Steam Deck side: libhl built from the pinned checkout,
+#            the way the game's own Linux workflow does it
+#   windows  the artist's side: hl.h and libhl.lib taken from the same
+#            release archive the game builds against, never built here
+#
+# The bench is the point of this repository for now. It is Jolt's own
+# pyramid, and the binding next door runs the same file against the same
+# numbers, so the two can be put side by side.
+
+name: Build
+
+on:
+  workflow_dispatch:
+  push:
+
+jobs:
+  linux:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 30
+
+    # Only so the run can leave its results on a branch of its own. See the
+    # last step for why that is worth a permission.
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Dependencies
+        run: |
+          set -eux
+          sudo apt-get update -y
+          sudo apt-get install --no-install-recommends -y zlib1g-dev cmake ninja-build
+
+      # Only libhl and the hl binary: no .hdll from the runtime is needed
+      # here, the bench draws nothing and opens no window.
+      - name: Build HashLink
+        run: |
+          set -eux
+          cd vendor/hashlink
+          make -j"$(nproc)" libhl.so
+          make -j"$(nproc)" hl
+          ls -la libhl.so hl
+
+      - name: Build box3d.hdll
+        run: |
+          set -eux -o pipefail
+          start=$(date +%s)
+          cmake -S . -B build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DHL_ROOT="$GITHUB_WORKSPACE/vendor/hashlink"
+          # The log goes to the results branch as well, so a compile error
+          # can be read without a token: the Actions API keeps logs behind one.
+          cmake --build build -j"$(nproc)" 2>&1 | tee build/build.log
+          echo "::notice title=Build time::$(( $(date +%s) - start ))s from cold"
+          ls -la build/box3d.hdll
+
+      # Exports are worth checking before running: a .hdll missing a symbol
+      # does not fail to build, it fails to load, and the message names only
+      # the first missing function.
+      - name: Check exports
+        run: |
+          set -eux
+          nm -D --defined-only build/box3d.hdll > exports.txt
+          for want in box3d_init box3d_world_create box3d_world_add_box \
+                      box3d_world_add_sphere box3d_world_add_capsule \
+                      box3d_world_step box3d_world_get_transform; do
+            grep -q " $want\$" exports.txt || { echo "$want missing from box3d.hdll"; exit 1; }
+          done
+
+      - name: Get Haxe
+        run: |
+          set -eux
+          curl -fsSL -o haxe.tar.gz \
+            https://github.com/HaxeFoundation/haxe/releases/download/4.3.6/haxe-4.3.6-linux64.tar.gz
+          mkdir -p haxe && tar -xzf haxe.tar.gz -C haxe --strip-components=1
+          echo "$PWD/haxe" >> "$GITHUB_PATH"
+          echo "HAXE_STD_PATH=$PWD/haxe/std" >> "$GITHUB_ENV"
+
+      - name: Compile the bench
+        run: haxe test/bench.hxml
+
+      # Both box3d.hdll and bench.hl already land in build/, and HashLink
+      # looks for native modules next to the bytecode.
+      #
+      # The output is echoed back as notices because a run's logs need admin
+      # rights to download, while annotations do not. GitHub keeps only the
+      # first ten notices of a step, so the bench says everything in fewer
+      # lines than that.
+      - name: Run the bench
+        run: |
+          set -eux
+          cd build
+          export LD_LIBRARY_PATH="$GITHUB_WORKSPACE/vendor/hashlink"
+          set +e
+          "$GITHUB_WORKSPACE/vendor/hashlink/hl" bench.hl > out.txt 2>&1
+          code=$?
+          set -e
+          while IFS= read -r line; do echo "::notice title=Bench::$line"; done < out.txt
+          exit $code
+
+      # Annotations are readable without an account, but only ten of them
+      # survive per step, and the API that serves them refuses anyone
+      # unauthenticated after sixty requests an hour. A file on a branch has
+      # neither limit: raw.githubusercontent.com will simply hand it over.
+      #
+      # The branch holds one commit and is replaced every run - it is output,
+      # not history.
+      - name: Leave the results on the results branch
+        if: always()
+        env:
+          TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -eu
+          rm -rf pub && mkdir pub
+          cp build/out.txt pub/bench.txt 2>/dev/null || echo "no bench output" > pub/bench.txt
+          cp build/build.log pub/build.txt 2>/dev/null || echo "no build log" > pub/build.txt
+          echo "$GITHUB_SHA" > pub/commit.txt
+          cd pub
+          git init -q
+          git checkout -q -b results
+          git add -A
+          git -c user.name=ci -c user.email=ci@local commit -qm "results for $GITHUB_SHA"
+          git push -q --force \
+            "https://x-access-token:$TOKEN@github.com/$GITHUB_REPOSITORY.git" results
+
+  windows:
+    runs-on: windows-latest
+    timeout-minutes: 30
+
+    steps:
+      # vendor/hashlink is not needed here at all: the headers and the
+      # import library come out of the release archive below, exactly the
+      # ones the game will be running next to.
+      - uses: actions/checkout@v4
+      - name: Submodules
+        run: git submodule update --init --depth 1 vendor/box3d
+
+      - name: Get the HashLink release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release download 1.16 --repo HaxeFoundation/hashlink --pattern "*win*.zip" --output hl.zip --clobber
+          Expand-Archive hl.zip -DestinationPath runtime -Force
+          $inc = Get-ChildItem runtime -Recurse -Filter hl.h -File | Select-Object -First 1
+          $lib = Get-ChildItem runtime -Recurse -Filter libhl.lib -File | Select-Object -First 1
+          $exe = Get-ChildItem runtime -Recurse -Filter hl.exe -File | Select-Object -First 1
+          if (-not $inc -or -not $lib -or -not $exe) { throw "the archive lacks hl.h, libhl.lib or hl.exe" }
+          # No BOM: the runner reads this file as UTF-8 and PowerShell writes
+          # one readily, and then the value carries three bytes of junk.
+          [IO.File]::AppendAllText($env:GITHUB_ENV,
+            "HL_INCLUDE=$($inc.DirectoryName)`nHL_LIB=$($lib.FullName)`nHL_BIN=$($exe.DirectoryName)`n",
+            (New-Object Text.UTF8Encoding $false))
+
+      - name: Build box3d.hdll
+        shell: pwsh
+        run: |
+          $start = Get-Date
+          cmake -S . -B build -A x64 -DHL_INCLUDE="$env:HL_INCLUDE" -DHL_LIB="$env:HL_LIB"
+          if ($LASTEXITCODE -ne 0) { throw "configure failed" }
+          cmake --build build --config Release --parallel
+          if ($LASTEXITCODE -ne 0) { throw "build failed" }
+          $took = [int]((Get-Date) - $start).TotalSeconds
+          Write-Host "::notice title=Build time (Windows)::${took}s from cold"
+          if (-not (Test-Path build/box3d.hdll)) { throw "build/box3d.hdll is not there" }
+          Get-Item build/box3d.hdll | Format-Table Name, Length
+
+      - name: Get Haxe
+        shell: pwsh
+        run: |
+          curl.exe -fsSL -o haxe.zip https://github.com/HaxeFoundation/haxe/releases/download/4.3.6/haxe-4.3.6-win64.zip
+          Expand-Archive haxe.zip -DestinationPath haxe -Force
+          $exe = Get-ChildItem haxe -Recurse -Filter haxe.exe -File | Select-Object -First 1
+          [IO.File]::AppendAllText($env:GITHUB_PATH, "$($exe.DirectoryName)`n", (New-Object Text.UTF8Encoding $false))
+          [IO.File]::AppendAllText($env:GITHUB_ENV, "HAXE_STD_PATH=$($exe.DirectoryName)\std`n", (New-Object Text.UTF8Encoding $false))
+
+      - name: Compile the bench
+        shell: pwsh
+        run: |
+          haxe test/bench.hxml
+          if ($LASTEXITCODE -ne 0) { throw "haxe failed" }
+
+      # The same bench, on the runtime the artist runs. libhl.dll and
+      # vcruntime140.dll come along from the archive: hl.exe needs them
+      # next to itself, and box3d.hdll next to the bytecode.
+      - name: Run the bench
+        shell: pwsh
+        run: |
+          Copy-Item "$env:HL_BIN\*.dll" build\
+          Copy-Item "$env:HL_BIN\hl.exe" build\
+          Push-Location build
+          $out = & .\hl.exe bench.hl 2>&1
+          $code = $LASTEXITCODE
+          Pop-Location
+          foreach ($line in $out) { Write-Host "::notice title=Bench (Windows)::$line" }
+          if ($code -ne 0) { throw "the bench failed with $code" }
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: box3d.hdll-windows
+          path: build/box3d.hdll
+          retention-days: 14
