@@ -171,6 +171,42 @@ class Body {
 		return s;
 	}
 
+	#if !box3d_no_heaps
+	/**
+		Gives the body something to draw itself with, built out of its own
+		shapes, and sets `object` to it.
+
+		For looking at a scene before it has any art in it. What appears is
+		the geometry the solver is using rather than a model that resembles
+		it, which is the whole point: a model that quietly disagrees with
+		the collision is a bug nobody can see.
+
+		Replace `object` with a real model whenever there is one; `World.sync`
+		does not care which it is driving.
+	**/
+	public function attach(parent:h3d.scene.Object, ?material:h3d.mat.Material):h3d.scene.Object {
+		object = Draw.body(this, parent, material);
+		place();
+		return object;
+	}
+
+	/**
+		Puts whatever this body drives where the body is.
+
+		Called when something is attached and again whenever the body moves.
+		The first of those matters more than it looks: a static body never
+		moves, so it is never in the world's move events, so without this it
+		would be drawn at the origin for ever - and a floor drawn half a
+		metre from where it is, is a floor everything sinks into.
+	**/
+	public function place() {
+		if (object == null) return;
+		object.setPosition(x, y, z);
+		world.quat.set(qx, qy, qz, qw);
+		object.setRotationQuat(world.quat);
+	}
+	#end
+
 	// --- where it is -------------------------------------------------------
 
 	/** Fills `x, y, z` and the four of `q` from the world. **/

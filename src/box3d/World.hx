@@ -246,11 +246,7 @@ class World {
 			body.qz = moves.getF32(at + 24);
 			body.qw = moves.getF32(at + 28);
 			#if !box3d_no_heaps
-			final o = body.object;
-			if (o == null) continue;
-			o.setPosition(body.x, body.y, body.z);
-			quat.set(body.qx, body.qy, body.qz, body.qw);
-			o.setRotationQuat(quat);
+			body.place();
 			#end
 		}
 	}
@@ -267,11 +263,7 @@ class World {
 		for (body in bodies) {
 			body.read();
 			#if !box3d_no_heaps
-			final o = body.object;
-			if (o == null) continue;
-			o.setPosition(body.x, body.y, body.z);
-			quat.set(body.qx, body.qy, body.qz, body.qw);
-			o.setRotationQuat(quat);
+			body.place();
 			#end
 		}
 	}
@@ -281,7 +273,7 @@ class World {
 
 	#if !box3d_no_heaps
 	/** One quaternion for the whole sync, so that a frame allocates nothing. **/
-	final quat = new h3d.Quat();
+	@:allow(box3d) final quat = new h3d.Quat();
 	#end
 
 	/** Once, after the static geometry is in and before the first step. **/

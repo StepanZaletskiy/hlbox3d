@@ -1984,3 +1984,207 @@ DEFINE_PRIM(_I32, events_contacts, _WORLD _BYTES _I32);
 DEFINE_PRIM(_I32, events_sensors, _WORLD _BYTES _I32);
 DEFINE_PRIM(_I32, events_moved, _WORLD _BYTES _I32);
 DEFINE_PRIM(_I32, events_joints, _WORLD _BYTES _I32);
+
+/* ---- shapes as triangles -------------------------------------------- */
+
+/*
+	Any shape, as triangles in the body's own coordinates.
+
+	This is what the Heaps side builds a mesh out of, and it is worth
+	doing this way rather than making a sphere in Haxe and hoping it
+	matches: what comes back is the geometry the solver is actually
+	using, including the eight corners a box really has and the exact
+	hull that came out of simplifying a cloud of points. A model that
+	disagrees with the collision is a bug nobody can see, and this is how
+	it is made impossible.
+
+	Nine floats a triangle - three corners, three floats each - written
+	until `max` of them are full. The count comes back, and it is the
+	number written rather than the number there were, so a caller that
+	wants all of them asks once with a large buffer.
+
+	Round things are tessellated here rather than in Haxe because the
+	number of segments is a property of what it is for: this is for
+	looking at, so it is coarse enough to be cheap and fine enough not to
+	look like a mistake.
+*/
+
+#define TRI_RINGS 12
+#define TRI_SEGMENTS 16
+
+typedef struct {
+	vbyte *out;
+	int max, n;
+	/*
+		A point inside the shape. Every shape here is convex, so a face
+		faces outwards exactly when its normal points away from any point
+		inside - which is a cheaper thing to be sure of than getting the
+		winding right by hand in four places and finding out later that one
+		of them was backwards.
+	*/
+	b3Vec3 inside;
+} tri_ctx;
+
+/*
+	One triangle, wound so that (b - a) x (d - a) points out of the shape.
+
+	That is the convention every renderer worth the name computes a face
+	normal by, and getting it backwards is not a crash or a warning: it is
+	a scene lit from underneath, where the tops of things are black and
+	nobody can say why.
+*/
+static void tri(tri_ctx *c, b3Vec3 a, b3Vec3 b, b3Vec3 d) {
+	if( c->n >= c->max ) return;
+	b3Vec3 u = { b.x - a.x, b.y - a.y, b.z - a.z };
+	b3Vec3 v = { d.x - a.x, d.y - a.y, d.z - a.z };
+	b3Vec3 n = b3Cross(u, v);
+	b3Vec3 away = { a.x - c->inside.x, a.y - c->inside.y, a.z - c->inside.z };
+	vbyte *o = c->out + c->n * 9 * 4;
+	put3(o, 0, a);
+	if( n.x * away.x + n.y * away.y + n.z * away.z < 0.0f ) {
+		put3(o, 3, d);
+		put3(o, 6, b);
+	} else {
+		put3(o, 3, b);
+		put3(o, 6, d);
+	}
+	c->n++;
+}
+
+/* A point on a sphere of `r` about `centre`, at the given ring and segment. */
+static b3Vec3 ball_point(b3Vec3 centre, float r, int ring, int seg) {
+	float phi = 3.14159265f * (float)ring / (float)TRI_RINGS;
+	float theta = 6.28318531f * (float)seg / (float)TRI_SEGMENTS;
+	float s = sinf(phi);
+	return (b3Vec3){
+		centre.x + r * s * cosf(theta),
+		centre.y + r * s * sinf(theta),
+		centre.z + r * cosf(phi)
+	};
+}
+
+static void ball(tri_ctx *c, b3Vec3 centre, float r) {
+	for( int i = 0; i < TRI_RINGS; i++ )
+		for( int j = 0; j < TRI_SEGMENTS; j++ ) {
+			b3Vec3 a = ball_point(centre, r, i, j);
+			b3Vec3 b = ball_point(centre, r, i, j + 1);
+			b3Vec3 d = ball_point(centre, r, i + 1, j);
+			b3Vec3 e = ball_point(centre, r, i + 1, j + 1);
+			tri(c, a, b, d);
+			tri(c, b, e, d);
+		}
+}
+
+/*
+	A capsule as two half spheres and a tube between them, built in a
+	frame whose z runs from one end to the other.
+*/
+static void tube(tri_ctx *c, b3Vec3 p1, b3Vec3 p2, float r) {
+	b3Vec3 axis = { p2.x - p1.x, p2.y - p1.y, p2.z - p1.z };
+	float len = sqrtf(axis.x * axis.x + axis.y * axis.y + axis.z * axis.z);
+	if( len < 1e-6f ) {
+		ball(c, p1, r);
+		return;
+	}
+	b3Vec3 w = { axis.x / len, axis.y / len, axis.z / len };
+	b3Vec3 other = fabsf(w.z) < 0.9f ? (b3Vec3){ 0.0f, 0.0f, 1.0f } : (b3Vec3){ 1.0f, 0.0f, 0.0f };
+	b3Vec3 u = unit(b3Cross(other, w));
+	b3Vec3 v = b3Cross(w, u);
+
+	for( int j = 0; j < TRI_SEGMENTS; j++ ) {
+		float t0 = 6.28318531f * (float)j / (float)TRI_SEGMENTS;
+		float t1 = 6.28318531f * (float)(j + 1) / (float)TRI_SEGMENTS;
+		b3Vec3 r0 = { r * (u.x * cosf(t0) + v.x * sinf(t0)), r * (u.y * cosf(t0) + v.y * sinf(t0)),
+			r * (u.z * cosf(t0) + v.z * sinf(t0)) };
+		b3Vec3 r1 = { r * (u.x * cosf(t1) + v.x * sinf(t1)), r * (u.y * cosf(t1) + v.y * sinf(t1)),
+			r * (u.z * cosf(t1) + v.z * sinf(t1)) };
+		b3Vec3 a = { p1.x + r0.x, p1.y + r0.y, p1.z + r0.z };
+		b3Vec3 b = { p1.x + r1.x, p1.y + r1.y, p1.z + r1.z };
+		b3Vec3 d = { p2.x + r0.x, p2.y + r0.y, p2.z + r0.z };
+		b3Vec3 e = { p2.x + r1.x, p2.y + r1.y, p2.z + r1.z };
+		tri(c, a, b, d);
+		tri(c, b, e, d);
+	}
+	/* The rounded ends. Whole spheres: half of each is inside the tube. */
+	ball(c, p1, r);
+	ball(c, p2, r);
+}
+
+/*
+	A hull, face by face. Box3D keeps them as half-edges: a face names one
+	of its edges, and walking `next` goes round the face, so the corners
+	come out in order and a fan from the first is a proper triangulation
+	because every face of a convex hull is convex.
+*/
+static void hull_tris(tri_ctx *c, const b3HullData *hull) {
+	const b3Vec3 *points = b3GetHullPoints(hull);
+	const b3HullHalfEdge *edges = b3GetHullEdges(hull);
+	const b3HullFace *faces = b3GetHullFaces(hull);
+	if( points == NULL || edges == NULL || faces == NULL ) return;
+
+	for( int f = 0; f < hull->faceCount; f++ ) {
+		uint8_t first = faces[f].edge;
+		uint8_t e = edges[first].next;
+		uint8_t next = edges[e].next;
+		/* Forty is far more corners than a face has, and stops a broken
+		   hull from spinning here for ever. */
+		for( int guard = 0; guard < 40 && next != first; guard++ ) {
+			tri(c, points[edges[first].origin], points[edges[e].origin],
+				points[edges[next].origin]);
+			e = next;
+			next = edges[e].next;
+		}
+	}
+}
+
+HL_PRIM int HL_NAME(shape_triangles)(hb_world *w, int id, vbyte *out, int max) {
+	b3ShapeId s = shape_of(w, id);
+	if( !shape_ok(s) ) return 0;
+	tri_ctx c = { out, max, 0, { 0.0f, 0.0f, 0.0f } };
+
+	switch( b3Shape_GetType(s) ) {
+	case b3_sphereShape: {
+		b3Sphere sphere = b3Shape_GetSphere(s);
+		c.inside = sphere.center;
+		ball(&c, sphere.center, sphere.radius);
+		break;
+	}
+	case b3_capsuleShape: {
+		b3Capsule capsule = b3Shape_GetCapsule(s);
+		c.inside = (b3Vec3){ 0.5f * (capsule.center1.x + capsule.center2.x),
+			0.5f * (capsule.center1.y + capsule.center2.y),
+			0.5f * (capsule.center1.z + capsule.center2.z) };
+		tube(&c, capsule.center1, capsule.center2, capsule.radius);
+		break;
+	}
+	case b3_hullShape: {
+		const b3HullData *hull = b3Shape_GetHull(s);
+		if( hull != NULL ) {
+			/* The middle of its bounding box is inside a convex hull. */
+			c.inside = (b3Vec3){ 0.5f * (hull->aabb.lowerBound.x + hull->aabb.upperBound.x),
+				0.5f * (hull->aabb.lowerBound.y + hull->aabb.upperBound.y),
+				0.5f * (hull->aabb.lowerBound.z + hull->aabb.upperBound.z) };
+			hull_tris(&c, hull);
+		}
+		break;
+	}
+	default:
+		/*
+			Meshes and height fields are level geometry and are drawn from
+			whatever the game built them out of, which it still has. There
+			is no sense copying a hundred thousand triangles back out.
+		*/
+		break;
+	}
+	return c.n;
+}
+
+/* Which of Box3D's kinds this is, for a caller deciding how to draw it. */
+HL_PRIM int HL_NAME(shape_type)(hb_world *w, int id) {
+	b3ShapeId s = shape_of(w, id);
+	if( !shape_ok(s) ) return -1;
+	return (int)b3Shape_GetType(s);
+}
+
+DEFINE_PRIM(_I32, shape_triangles, _WORLD _I32 _BYTES _I32);
+DEFINE_PRIM(_I32, shape_type, _WORLD _I32);

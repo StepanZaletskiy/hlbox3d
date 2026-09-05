@@ -191,6 +191,15 @@ class Native {
 		return -1;
 	}
 
+	/** Nine f32 a triangle, in the body's own coordinates. Returns how many fitted. **/
+	public static function shape_triangles(w:WorldPtr, id:Int, out:hl.Bytes, max:Int):Int {
+		return 0;
+	}
+
+	public static function shape_type(w:WorldPtr, id:Int):Int {
+		return -1;
+	}
+
 	public static function shape_material(w:WorldPtr, id:Int, friction:Float, restitution:Float,
 			rolling:Float):Void {}
 

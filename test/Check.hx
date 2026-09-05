@@ -37,6 +37,7 @@ class Check {
 		events();
 		sensors();
 		moving();
+		triangles();
 		Sys.println(failures == 0 ? "all good" : '$failures failed');
 		Sys.exit(failures);
 	}
@@ -387,6 +388,67 @@ class Check {
 
 		// A static body was never in the list and is still where it was put.
 		near("and a static body stays where it was put", still.z, 0.5, 0.0001);
+
+		world.dispose();
+	}
+
+	/**
+		Shapes as triangles, which is what anything drawing them is built
+		on. Nothing here checks that it looks right - that needs eyes - but
+		it checks that the numbers are the shape's own, which is the part
+		that can be wrong silently.
+	**/
+	static function triangles() {
+		final world = level();
+		final buffer = new hl.Bytes(8192 * 9 * 4);
+
+		// A box is a hull of eight points with six quad faces, and a fan
+		// across a quad is two triangles.
+		final box = world.addBox(0.5, 0.25, 0.125, 0, 0, 3, Static);
+		final n = box.shapes[0].triangles(buffer, 8192);
+		is("a box comes out as twelve triangles", n, 12);
+
+		// And every corner of it is a corner of the box: the extents are
+		// exact, because a hull keeps the points it was built from.
+		var worst = 0.0;
+		for (i in 0...n * 3) {
+			final at = i * 3 * 4;
+			final dx = Math.abs(buffer.getF32(at)) - 0.5;
+			final dy = Math.abs(buffer.getF32(at + 4)) - 0.25;
+			final dz = Math.abs(buffer.getF32(at + 8)) - 0.125;
+			if (Math.abs(dx) > worst) worst = Math.abs(dx);
+			if (Math.abs(dy) > worst) worst = Math.abs(dy);
+			if (Math.abs(dz) > worst) worst = Math.abs(dz);
+		}
+		near("with its corners where the box's are", worst, 0, 0.0001);
+
+		// A sphere is tessellated here rather than in Haxe, so the count
+		// is ours: twelve rings of sixteen segments, two triangles each.
+		final ball = world.addSphere(0.7, 4, 0, 3, Static);
+		is("a sphere is tessellated", ball.shapes[0].triangles(buffer, 8192), 12 * 16 * 2);
+
+		// Every point of it is on the sphere, which is the thing worth
+		// checking about a tessellation written by hand.
+		var far = 0.0;
+		for (i in 0...12 * 16 * 2 * 3) {
+			final at = i * 3 * 4;
+			final x = buffer.getF32(at);
+			final y = buffer.getF32(at + 4);
+			final z = buffer.getF32(at + 8);
+			final r = Math.sqrt(x * x + y * y + z * z);
+			if (Math.abs(r - 0.7) > far) far = Math.abs(r - 0.7);
+		}
+		near("with every point on the sphere", far, 0, 0.0001);
+
+		// A capsule is a tube and two ends.
+		final pill = world.addCapsule(0.4, 0.2, 8, 0, 3, Static);
+		is("a capsule is a tube and two ends", pill.shapes[0].triangles(buffer, 8192),
+			16 * 2 + 2 * 12 * 16 * 2);
+
+		// A buffer too small is filled and no further, rather than being
+		// written past - which is the failure that would not be a failure
+		// until much later.
+		is("a small buffer is filled and no more", ball.shapes[0].triangles(buffer, 5), 5);
 
 		world.dispose();
 	}

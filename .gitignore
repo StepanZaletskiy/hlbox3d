@@ -1,2 +1,5 @@
-build/
 *.hl
+*.png
+/build.*/
+/build/
+build/

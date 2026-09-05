@@ -134,6 +134,30 @@ class Shape {
 		return this;
 	}
 
+	/**
+		The shape as triangles, in the body's own coordinates: nine floats
+		each, three corners of three.
+
+		What comes back is the geometry the solver is using - the eight
+		corners a box really has, the exact hull that came out of
+		simplifying a cloud of points - which is the reason to build a model
+		out of this rather than out of something that resembles it. A model
+		that quietly disagrees with the collision is the bug nobody can see.
+
+		Round things are tessellated: a sphere is twelve rings of sixteen,
+		a capsule is a tube of sixteen and two of those.
+
+		Meshes and height fields answer with nothing. They are level
+		geometry that the game built and still has, and copying a hundred
+		thousand triangles back out would be silly.
+
+		Returns how many were written, which is never more than `max`. A
+		buffer too small is filled and no further.
+	**/
+	public function triangles(out:hl.Bytes, max:Int):Int {
+		return Native.shape_triangles(body.world.w, id, out, max);
+	}
+
 	/** Takes the shape off its body. The body's mass is worked out again. **/
 	public function remove(updateMass = true) {
 		Native.shape_remove(body.world.w, id, updateMass);
