@@ -1,4 +1,5 @@
 import box3d.World;
+import box3d.Body;
 
 /**
 	The one scene worth timing, and the twin of Pyramid.hx in the Jolt
@@ -63,7 +64,7 @@ class Bench {
 		world.addBox(100, 100, 1, 0, 0, -1, Static);
 
 		var bodies = 0;
-		var top = -1;
+		var top:Body = null;
 		for (i in 0...layers) {
 			final half = i & 1 != 0 ? 1.0 : 0.0;
 			for (j in Std.int(i / 2)...layers - Std.int((i + 1) / 2))
@@ -85,8 +86,8 @@ class Bench {
 
 		// Where the topmost box should be standing once the gaps are gone:
 		// layer i rests at 1 + 2i, because the boxes are two metres tall.
-		world.read(top);
-		final sag = round(1 + 2 * (layers - 1) - world.z);
+		top.read();
+		final sag = round(1 + 2 * (layers - 1) - top.z);
 
 		Sys.println('box3d: $bodies boxes, $layers layers, ${world.substeps} substep(s), $threads thread(s)');
 		Sys.println('  falling: ${round(falling)} ms/step');

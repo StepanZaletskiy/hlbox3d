@@ -1,38 +1,36 @@
 package box3d;
 
-/** How a body moves. The numbers are Box3D's own, and Jolt's happen to agree. **/
-enum abstract Motion(Int) to Int {
-	/** Never moves. Level geometry. **/
-	var Static = 0;
-	/** Moved by hand, pushes everything, is pushed by nothing. **/
-	var Kinematic = 1;
-	/** Falls, bounces, rolls. Everything else. **/
-	var Dynamic = 2;
-}
-
 /**
 	A physics world. One per level.
 
-	Written to the same shape as `jolt.World` next door, so that the two
-	can be put side by side and measured, and so that a game written
-	against one is not rewritten from scratch for the other.
+	The short version, which is most of what anyone needs:
 
-	Bodies are ints, not objects: the shim hands out a number, the game
-	keeps it, and everything here takes it back. Box3D's own handle is
-	eight bytes - a slot, a world, and a generation counter that catches
-	a stale handle instead of letting it address whoever took the slot -
-	and the shim keeps the table that turns one into the other.
+	```haxe
+	final world = new box3d.World();
+	world.setGravity(0, 0, -9.81);
 
-	Reading a body's state is done into fields of this class rather than
-	into a fresh object - `read` fills `x, y, z, qx, qy, qz, qw` - because
-	the game reads every body every frame, and an allocation per read
-	would be the garbage collector's whole evening.
+	world.addBox(50, 50, 1, 0, 0, -1, Static);
 
-	One difference from the Jolt binding, and it is in the API rather than
-	in the wrapping: there, a shape is a thing of its own that any number
-	of bodies may share; here a shape is made on a body and belongs to it.
-	So the calls below make a body and its shape together, and mass comes
-	from density and volume rather than being given.
+	final crate = world.addBox(0.5, 0.5, 0.5, 0, 0, 4);
+	crate.object = new h3d.scene.Mesh(h3d.prim.Cube.defaultUnitCube(), s3d);
+
+	// once a frame
+	world.update(dt);
+	```
+
+	`update` steps the simulation and then moves every body's `object` to
+	match. Nothing has to be registered and nothing has to be undone: a
+	body is in the world's list from the moment it is made.
+
+	Bodies are objects here rather than the integers the shim deals in.
+	One object per body costs nothing and is what makes the rest of this
+	readable; nothing in the loop allocates, which is the part that would
+	have mattered.
+
+	Shapes belong to bodies. `addBox` and the two beside it make a body
+	and its first shape together, which covers most things; anything with
+	more than one shape - a chair, a hammer, a door with a handle - is
+	made with `add` and then given its shapes one at a time.
 **/
 class World {
 
@@ -40,41 +38,57 @@ class World {
 
 	@:allow(box3d) final w:Native.WorldPtr;
 
+	/**
+		One scratch buffer for everything that crosses as bytes. Wide
+		arguments go through it on the way down and transforms come back
+		through it on the way up, one call at a time, so nothing in a frame
+		allocates. Sixty-four floats is more than any primitive asks for.
+	**/
+	@:allow(box3d) final floats = new hl.Bytes(64 * 4);
+
+	/** Every body in the world, in the order they were made. **/
+	public var bodies(default, null):Array<Body> = [];
+
 	/** What `setGravity` was last given. Down is -z from the start. **/
 	public var gx(default, null) = 0.0;
 	public var gy(default, null) = 0.0;
 	public var gz(default, null) = -9.81;
 
-	/** What the last `read` found. **/
-	public var x = 0.0;
-	public var y = 0.0;
-	public var z = 0.0;
-	public var qx = 0.0;
-	public var qy = 0.0;
-	public var qz = 0.0;
-	public var qw = 1.0;
-
-	/** What the last `readVelocity` found. **/
-	public var vx = 0.0;
-	public var vy = 0.0;
-	public var vz = 0.0;
-
 	/**
-		How many times the solver goes round inside one step. Box3D's own
-		default is four; more is stiffer stacks and a longer step.
+		How many times the solver goes round inside one step.
+
+		This is Box3D's main dial for how firmly a stack stands, and its
+		own default is four. One is cheap and soft: a pile of a thousand
+		boxes settles about twice as fast and sags four times as far. Two
+		is a good place for a game that has stacks in it at all.
 	**/
 	public var substeps = 4;
 
-	final seven = new hl.Bytes(7 * 4);
-	final three = new hl.Bytes(3 * 4);
-	final args = new hl.Bytes(7 * 4);
+	/**
+		What the next shape is made with, unless it says otherwise. These
+		are set on the world rather than passed to every maker because a
+		level usually wants one answer for all of them, and the ones that
+		differ are few enough to fix afterwards through `Shape.material`.
+
+		A density of 1000 is water, and about right for anything wooden or
+		full. Friction of 0.6 is dry and ordinary. Nothing bounces and
+		nothing resists rolling until told to.
+	**/
+	public var density = 1000.0;
+	public var friction = 0.6;
+	public var restitution = 0.0;
+	public var rolling = 0.0;
 
 	/**
-		`maxBodies` is a hint here rather than a cap - Box3D grows - and
-		is taken so that both bindings are opened with the same call.
-		`threads` at 0 runs everything on the calling thread.
+		`threads` at 1 is the calling thread alone, which is where to start:
+		a level has to be busy before threading pays for itself, and Box3D
+		gives the same answer at any width, so turning it up later changes
+		the speed and not the simulation.
+
+		`maxBodies` is a hint rather than a cap - Box3D grows - and is
+		taken so that this and the Jolt binding are opened the same way.
 	**/
-	public function new(maxBodies:Int, threads = 0) {
+	public function new(maxBodies = 4096, threads = 1) {
 		if (!started) {
 			if (!Native.init()) throw "box3d: init failed";
 			started = true;
@@ -90,17 +104,135 @@ class World {
 		Native.world_set_gravity(w, x, y, z);
 	}
 
+	// --- making things -----------------------------------------------------
+
+	/**
+		An empty body, to be given its shapes afterwards. Until it has one
+		it has no mass and no collision: it is a point that moves.
+	**/
+	public function add(motion:Motion = Dynamic, x = 0.0, y = 0.0, z = 0.0, qx = 0.0, qy = 0.0,
+			qz = 0.0, qw = 1.0):Body {
+		floats.setF32(0, x);
+		floats.setF32(4, y);
+		floats.setF32(8, z);
+		floats.setF32(12, qx);
+		floats.setF32(16, qy);
+		floats.setF32(20, qz);
+		floats.setF32(24, qw);
+		final id = Native.world_add_body(w, floats, motion);
+		if (id < 0) throw "box3d: the body could not be made";
+		final body = new Body(this, id);
+		body.x = x;
+		body.y = y;
+		body.z = z;
+		body.qx = qx;
+		body.qy = qy;
+		body.qz = qz;
+		body.qw = qw;
+		bodies.push(body);
+		return body;
+	}
+
+	/** Half extents, not full size: a crate 32 cm across is `addBox(0.16, 0.16, 0.16, ...)`. **/
+	public function addBox(hx:Float, hy:Float, hz:Float, x = 0.0, y = 0.0, z = 0.0,
+			motion:Motion = Dynamic):Body {
+		final body = add(motion, x, y, z);
+		body.box(hx, hy, hz);
+		return body;
+	}
+
+	public function addSphere(radius:Float, x = 0.0, y = 0.0, z = 0.0,
+			motion:Motion = Dynamic):Body {
+		final body = add(motion, x, y, z);
+		body.sphere(radius);
+		return body;
+	}
+
+	/**
+		Standing on its end, along z: `halfHeight` is half the straight
+		part, so the whole thing is `2 * halfHeight + 2 * radius` tall.
+
+		Lying it along another axis is a matter of giving `Body.capsule`
+		two other points, which is the shape Box3D says a capsule in.
+	**/
+	public function addCapsule(halfHeight:Float, radius:Float, x = 0.0, y = 0.0, z = 0.0,
+			motion:Motion = Dynamic):Body {
+		final body = add(motion, x, y, z);
+		body.capsule(0, 0, -halfHeight, 0, 0, halfHeight, radius);
+		return body;
+	}
+
+	/** Writes the four shape settings into a buffer at `at`, in floats. **/
+	@:allow(box3d)
+	function settings(b:hl.Bytes, at:Int) {
+		b.setF32(at * 4, density);
+		b.setF32((at + 1) * 4, friction);
+		b.setF32((at + 2) * 4, restitution);
+		b.setF32((at + 3) * 4, rolling);
+	}
+
+	@:allow(box3d)
+	function forget(body:Body) {
+		bodies.remove(body);
+	}
+
+	// --- running it --------------------------------------------------------
+
+	/**
+		A step and then a sync: what a game calls once a frame.
+
+		The step is fixed, whatever `dt` says. A physics step that varies
+		with the frame rate gives a different simulation on every machine
+		and a worse one on a slow machine, and the cure is worse than the
+		disease. Pass the frame time and let this decide how many steps of
+		its own to take.
+	**/
+	public function update(dt:Float) {
+		step(dt);
+		sync();
+	}
+
+	/** One step, and nothing else. **/
+	public function step(dt:Float):Int {
+		return Native.world_step(w, dt, substeps);
+	}
+
+	/**
+		Reads every body back and moves whatever each one drives.
+
+		Bodies that are asleep are read too. Skipping them would save
+		little - a read is a handful of floats out of a buffer - and would
+		cost the one frame where something is woken by a neighbour and
+		nobody notices.
+	**/
+	public function sync() {
+		for (body in bodies) {
+			body.read();
+			#if !box3d_no_heaps
+			final o = body.object;
+			if (o == null) continue;
+			o.setPosition(body.x, body.y, body.z);
+			quat.set(body.qx, body.qy, body.qz, body.qw);
+			o.setRotationQuat(quat);
+			#end
+		}
+	}
+
+	#if !box3d_no_heaps
+	/** One quaternion for the whole sync, so that a frame allocates nothing. **/
+	final quat = new h3d.Quat();
+	#end
+
 	/** Once, after the static geometry is in and before the first step. **/
 	public function optimize()
 		Native.world_optimize(w);
 
-	/** One fixed step. The int is Box3D having nothing to report; Jolt has. **/
-	public function step(dt:Float):Int
-		return Native.world_step(w, dt, substeps);
-
 	/**
 		Whether bodies that stop moving may be put to bed. On is Box3D's
-		own, and what a game wants; off is for timing.
+		own and what a game wants: a level is mostly things lying still,
+		and they are nearly free while they sleep. Off is for timing, so
+		that a solver is not credited for a cheap step it reached by doing
+		nothing.
 	**/
 	public function allowSleeping(allow:Bool)
 		Native.world_enable_sleeping(w, allow);
@@ -111,71 +243,70 @@ class World {
 	function get_activeCount():Int
 		return Native.world_active_count(w);
 
-	// --- Bodies ------------------------------------------------------------
-
-	/** Half extents, not full size: a crate 32 cm across is `addBox(0.16, 0.16, 0.16, ...)`. **/
-	public function addBox(hx:Float, hy:Float, hz:Float, x:Float, y:Float, z:Float, motion:Motion,
-			density = 1000.0):Int {
-		put([hx, hy, hz, x, y, z, density]);
-		return Native.world_add_box(w, args, motion);
-	}
-
-	public function addSphere(radius:Float, x:Float, y:Float, z:Float, motion:Motion,
-			density = 1000.0):Int {
-		put([radius, x, y, z, density]);
-		return Native.world_add_sphere(w, args, motion);
-	}
+	/**
+		Whether a fast body is swept along its path instead of being moved
+		to the far side of whatever was in the way. On is Box3D's own, and
+		this is the first thing to check when small quick things go through
+		walls - the second being whether the body itself is a `bullet`.
+	**/
+	public function enableContinuous(on = true)
+		Native.world_enable_continuous(w, on);
 
 	/**
-		Standing on its end: the axis is z. `halfHeight` is half of the
-		straight part, so the whole thing is `2 * halfHeight + 2 * radius`
-		tall.
+		Whether the solver starts each step from what it worked out last
+		time. On is Box3D's own and worth a great deal on stacks; turning
+		it off is a way of seeing how much of the steadiness came from it.
 	**/
-	public function addCapsule(halfHeight:Float, radius:Float, x:Float, y:Float, z:Float,
-			motion:Motion, density = 1000.0):Int {
-		put([halfHeight, radius, x, y, z, density]);
-		return Native.world_add_capsule(w, args, motion);
+	public function enableWarmStarting(on = true)
+		Native.world_enable_warm_starting(w, on);
+
+	/**
+		How a contact is pushed apart: the stiffness and damping of the
+		spring that does the pushing, and the speed above which a touch is
+		treated as an impact. Box3D's own are 30 Hz, a damping of 10, and
+		three metres a second.
+
+		Softer is more forgiving of things that start overlapping and less
+		convincing under load. It is rarely the answer; `substeps` usually
+		is.
+	**/
+	public function contactTuning(hertz = 30.0, damping = 10.0, speed = 3.0)
+		Native.world_contact_tuning(w, hertz, damping, speed);
+
+	/** Below this closing speed nothing bounces, however springy the material. **/
+	public function restitutionThreshold(speed:Float)
+		Native.world_restitution_threshold(w, speed);
+
+	/** Above this closing speed a contact is worth reporting as a hit. **/
+	public function hitThreshold(speed:Float)
+		Native.world_hit_threshold(w, speed);
+
+	/** The ceiling on how fast anything may travel. Box3D's own is 400 m/s. **/
+	public function maxSpeed(speed:Float)
+		Native.world_max_speed(w, speed);
+
+	/**
+		A blast at a point: everything within the radius is pushed away
+		from it, falling off to nothing at the edge.
+
+		The impulse is per square metre of the surface it pushes against,
+		so a wide thing catches more of it than a small one - which is what
+		an explosion does, and why a sheet of plating goes further than a
+		bolt.
+	**/
+	public function explode(x:Float, y:Float, z:Float, radius:Float, impulse:Float,
+			falloff = 0.0) {
+		floats.setF32(0, x);
+		floats.setF32(4, y);
+		floats.setF32(8, z);
+		floats.setF32(12, radius);
+		floats.setF32(16, falloff);
+		floats.setF32(20, impulse);
+		Native.world_explode(w, floats);
 	}
-
-	public function remove(id:Int)
-		Native.world_remove_body(w, id);
-
-	/** Fills `x, y, z, qx, qy, qz, qw`. **/
-	public function read(id:Int) {
-		Native.world_get_transform(w, id, seven);
-		x = seven.getF32(0);
-		y = seven.getF32(4);
-		z = seven.getF32(8);
-		qx = seven.getF32(12);
-		qy = seven.getF32(16);
-		qz = seven.getF32(20);
-		qw = seven.getF32(24);
-	}
-
-	/** Fills `vx, vy, vz`. **/
-	public function readVelocity(id:Int) {
-		Native.world_get_velocity(w, id, three);
-		vx = three.getF32(0);
-		vy = three.getF32(4);
-		vz = three.getF32(8);
-	}
-
-	public function setVelocity(id:Int, x:Float, y:Float, z:Float)
-		Native.world_set_velocity(w, id, x, y, z);
-
-	/** A quaternion, x y z w. The body stays where it is. **/
-	public function setRotation(id:Int, qx:Float, qy:Float, qz:Float, qw:Float)
-		Native.world_set_rotation(w, id, qx, qy, qz, qw);
-
-	public function isActive(id:Int):Bool
-		return Native.world_is_active(w, id);
 
 	public function dispose() {
+		bodies = [];
 		Native.world_destroy(w);
-	}
-
-	/** The one buffer the makers write their arguments into. **/
-	function put(a:Array<Float>) {
-		for (i in 0...a.length) args.setF32(i * 4, a[i]);
 	}
 }
