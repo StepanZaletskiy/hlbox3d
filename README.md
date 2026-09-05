@@ -19,6 +19,61 @@ faster than what is on the market; its own documentation says nothing of
 the sort, and neither says anything about the machine the game is built
 on. So: the same pyramid, the same step, one thread, both libraries.
 
+## The number
+
+One machine, one thread, both libraries built by the same compiler, the
+same pyramid of two-metre boxes dropped onto a floor. Sleeping off, so
+that a library is not credited for a cheap step it reached by putting
+the pile to bed. Penetration slop set to 5 mm on both, because Jolt
+allows 2 cm by default and Box3D 5 mm, and over a stack that difference
+is centimetres of sag that belongs to neither solver.
+
+The dial is different on each and cannot be made the same: Box3D solves
+a step over substeps and that is how it is asked for a firmer stack;
+Jolt runs the step once and turns its iterations. So both are run across
+their own range, and the columns are read by what they bought - the cost
+of a settled step, and how far the top box has sunk below where it
+should be standing.
+
+1240 boxes, fifteen layers:
+
+| dial | jolt | box3d |
+|---|---|---|
+| 1 | **4.14 ms**, 6.7 cm | 4.16 ms, 11.8 cm |
+| 2 | 7.97 ms, 3.8 cm | **5.75 ms**, 3.2 cm |
+| 4 | 16.46 ms, 1.4 cm | **10.41 ms**, 0.7 cm |
+
+16206 boxes, thirty-six layers, which is Box3D's own showcase:
+
+| dial | jolt | box3d |
+|---|---|---|
+| 1 | **73.6 ms**, 21 cm | 130.1 ms, *collapsed* |
+| 2 | 134.8 ms, 16 cm | 159.9 ms, 17 cm |
+| 4 | 267.8 ms, 3.1 cm | **221.6 ms**, 4.8 cm |
+
+Read by what was bought rather than by row. On the small pyramid the
+cheapest setting is a tie and Jolt's stack is the tighter of the two;
+past that Box3D buys the same firmness for about a third less. On the
+large one it goes the other way: Jolt reaches Box3D's two-substep
+firmness for half the price, and only at the tightest end is Box3D ahead
+again.
+
+And across the two sizes, Jolt scales better. Thirteen times the bodies
+costs it sixteen times the step; Box3D twenty-one.
+
+So: Box3D is better at firm stacks of a few thousand bodies, by about
+half again. It is not faster in general, it is not a different class of
+thing, and on a large scene it is the slower of the two. Whoever said
+otherwise was not measuring this.
+
+Two things this does not measure and should not be read as covering.
+Both libraries ran on one thread; Box3D's threading is deterministic
+across worker counts and Jolt makes no such promise, which is worth more
+than a benchmark to anyone shipping a networked game. And a pyramid is
+the one workload Box3D was built around and Jolt is weakest at. A game
+with a few hundred small things mostly asleep, a character and some
+raycasts is a different question, and this answers none of it.
+
 ## What it binds so far
 
 A world, three shapes, bodies as ids, a step, and the transforms read
@@ -80,8 +135,12 @@ itself.
 
 ## Building
 
-The module is built by CI, on Linux and on Windows, and the bench runs on
-both. See `.github/workflows/build.yml`. By hand:
+`tools/build.ps1` does the whole of it on Windows: it finds CMake where
+Visual Studio or the standalone installer left it, downloads the
+HashLink release the CI job uses, and builds Release. `-Bench` builds
+and then runs the pyramid.
+
+By hand, or on Linux:
 
 ```
 cmake -S . -B build -DHL_ROOT=vendor/hashlink        # a built checkout
@@ -90,13 +149,39 @@ cmake --build build
 haxe test/bench.hxml
 ```
 
+`.github/workflows/build.yml` does both on Linux and Windows and runs
+the bench on each. It has never run: this repository has no remote yet.
+
 ## What is not here yet
 
-Everything the game actually uses beyond the bench: meshes and height
-fields, compound shapes, contacts read back, constraints, kinematic
-movement, materials, rays. And the four things the game leans on hardest,
-which Box3D has no counterpart for at all: a character controller (though
-`b3World_CastMover` is most of one), vehicles, ragdolls, soft bodies.
+Almost everything, and the shortness of that list is about this binding
+rather than about Box3D. Eighteen primitives are bound. Box3D publishes
+five hundred and eighty-five functions.
+
+What is bound: a world, three shapes, bodies as ids, a step, transforms
+and velocities read back. That is exactly enough to run the bench.
+
+What Box3D has and this does not yet reach: spheres, capsules, convex
+hulls, meshes, height fields and baked compounds; nine kinds of joint;
+raycasts, shape casts and overlap queries against each of those shapes;
+sensors and contact, body and joint event streams; per-body sleep
+thresholds; and `b3World_CastMover` / `b3World_CollideMover`, which are
+the pieces a character controller is built out of. All of it is a shim
+away.
+
+What Box3D does not have at all, and the game currently leans on:
+
+- **Soft bodies.** No counterpart of any kind. Nine of the showcase
+  scenes are soft bodies.
+- **Ragdolls as a system.** There are joints, but no skeleton, no pose,
+  and nothing like `DriveToPoseUsingMotors` - which is what makes the
+  puppet walk rather than hang.
+- **Buoyancy.** No counterpart, though for boxes and spheres this is an
+  impulse from the submerged volume and is perhaps thirty lines.
+- **A vehicle model.** `b3WheelJoint` is a good one - suspension,
+  steering, a limit, a spin motor - but it is a mechanical joint, not
+  Jolt's vehicle: no tyre friction curves, no engine, gearbox or
+  differential, no tracks. That part would be written by hand.
 
 That list is the price of a move, and it is why this repository is a
 measurement before it is anything else.
