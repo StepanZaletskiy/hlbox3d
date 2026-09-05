@@ -110,6 +110,7 @@ typedef struct {
 	b3WorldId id;
 	hb_table bodies;
 	hb_table shapes;
+	hb_table joints;
 } hb_world;
 
 /*
@@ -119,6 +120,7 @@ typedef struct {
 */
 static uint64_t pack_body(b3BodyId b) { uint64_t v = 0; memcpy(&v, &b, sizeof(b)); return v; }
 static uint64_t pack_shape(b3ShapeId s) { uint64_t v = 0; memcpy(&v, &s, sizeof(s)); return v; }
+static uint64_t pack_joint(b3JointId j) { uint64_t v = 0; memcpy(&v, &j, sizeof(j)); return v; }
 
 static b3BodyId body_of(hb_world *w, int id) {
 	b3BodyId b;
@@ -202,6 +204,7 @@ HL_PRIM hb_world *HL_NAME(world_create)(int max_bodies, int threads) {
 	memset(w, 0, sizeof(hb_world));
 	hb_table_init(&w->bodies);
 	hb_table_init(&w->shapes);
+	hb_table_init(&w->joints);
 
 	b3WorldDef def = b3DefaultWorldDef();
 	def.gravity = (b3Vec3){ 0.0f, 0.0f, -9.81f };
@@ -220,6 +223,7 @@ HL_PRIM void HL_NAME(world_destroy)(hb_world *w) {
 	b3DestroyWorld(w->id);
 	hb_table_free(&w->bodies);
 	hb_table_free(&w->shapes);
+	hb_table_free(&w->joints);
 	free(w);
 }
 
@@ -1245,3 +1249,561 @@ DEFINE_PRIM(_I32, world_overlap_box, _WORLD _BYTES _BYTES _I32);
 DEFINE_PRIM(_BOOL, world_cast, _WORLD _BYTES _I32 _BYTES);
 DEFINE_PRIM(_F64, world_cast_mover, _WORLD _BYTES);
 DEFINE_PRIM(_I32, world_collide_mover, _WORLD _BYTES _BYTES _I32);
+
+/* ---- joints --------------------------------------------------------- */
+
+/*
+	Nine kinds of joint, and a decision about how to bind them.
+
+	Box3D offers about seventy setters across the nine - every field of
+	every definition, separately. Binding each one would be seventy
+	primitives for a surface a game touches at two moments: when the
+	joint is made, and when a motor is turned on or off.
+
+	So making one takes the whole definition at once, as a buffer of
+	floats laid out in the order the struct declares them, and changing
+	one afterwards goes through a handful of calls that work out from the
+	joint's own type which of Box3D's setters they mean. A motor is a
+	motor whether it drives a hinge, a slider or a winch, and asking for
+	one on a weld joint quietly does nothing rather than being an error -
+	which is the right answer for a scene that turns motors on in a loop
+	over everything it built.
+
+	Every definition begins the same way, with the two frames: where the
+	joint sits on each body, and how it is turned there. Which axis means
+	what is the joint's business - a hinge turns about the frame's x, a
+	slider slides along it - and getting a frame right is most of the work
+	of building one, which is why the Haxe side works them out from a
+	point and an axis in the world.
+*/
+
+/* The base every definition starts with: fifteen floats. */
+static void joint_base(b3JointDef *base, hb_world *w, int a, int b, vbyte *v) {
+	base->bodyIdA = body_of(w, a);
+	base->bodyIdB = body_of(w, b);
+	base->localFrameA.p = v3(v, 0);
+	base->localFrameA.q = (b3Quat){ { ff(v, 3), ff(v, 4), ff(v, 5) }, ff(v, 6) };
+	base->localFrameB.p = v3(v, 7);
+	base->localFrameB.q = (b3Quat){ { ff(v, 10), ff(v, 11), ff(v, 12) }, ff(v, 13) };
+	base->collideConnected = ff(v, 14) != 0.0f;
+}
+
+static b3JointId joint_of(hb_world *w, int id) {
+	b3JointId j;
+	uint64_t x = hb_get(&w->joints, id);
+	memcpy(&j, &x, sizeof(j));
+	return j;
+}
+
+static bool joint_ok(b3JointId j) { return j.index1 != 0; }
+
+static int joint_keep(hb_world *w, b3JointId j) {
+	if( !joint_ok(j) ) return NO_SLOT;
+	int id = hb_keep(&w->joints, pack_joint(j));
+	b3Joint_SetUserData(j, (void*)(intptr_t)(id + 1));
+	return id;
+}
+
+static bool on(vbyte *v, int i) { return ff(v, i) != 0.0f; }
+
+/*
+	A rope or a spring between two points: they stay a set distance
+	apart, or within a range of distances, or are pulled towards one by a
+	spring.
+
+	This is a rope bridge, a tow line, a lamp hanging from a ceiling, and
+	with a motor a winch.
+*/
+HL_PRIM int HL_NAME(joint_distance)(hb_world *w, int a, int b, vbyte *v) {
+	b3DistanceJointDef def = b3DefaultDistanceJointDef();
+	joint_base(&def.base, w, a, b, v);
+	def.length = ff(v, 15);
+	def.enableSpring = on(v, 16);
+	def.hertz = ff(v, 17);
+	def.dampingRatio = ff(v, 18);
+	def.enableLimit = on(v, 19);
+	def.minLength = ff(v, 20);
+	def.maxLength = ff(v, 21);
+	def.enableMotor = on(v, 22);
+	def.maxMotorForce = ff(v, 23);
+	def.motorSpeed = ff(v, 24);
+	return joint_keep(w, b3CreateDistanceJoint(w->id, &def));
+}
+
+/*
+	A hinge: one turn about the frame's x and nothing else. A door, a
+	lid, a wheel that does not steer, an elbow with a limit on it.
+*/
+HL_PRIM int HL_NAME(joint_revolute)(hb_world *w, int a, int b, vbyte *v) {
+	b3RevoluteJointDef def = b3DefaultRevoluteJointDef();
+	joint_base(&def.base, w, a, b, v);
+	def.targetAngle = ff(v, 15);
+	def.enableSpring = on(v, 16);
+	def.hertz = ff(v, 17);
+	def.dampingRatio = ff(v, 18);
+	def.enableLimit = on(v, 19);
+	def.lowerAngle = ff(v, 20);
+	def.upperAngle = ff(v, 21);
+	def.enableMotor = on(v, 22);
+	def.maxMotorTorque = ff(v, 23);
+	def.motorSpeed = ff(v, 24);
+	return joint_keep(w, b3CreateRevoluteJoint(w->id, &def));
+}
+
+/*
+	A slider: movement along the frame's x and nothing else, no turning.
+	A piston, a drawer, a lift, a sliding door.
+*/
+HL_PRIM int HL_NAME(joint_prismatic)(hb_world *w, int a, int b, vbyte *v) {
+	b3PrismaticJointDef def = b3DefaultPrismaticJointDef();
+	joint_base(&def.base, w, a, b, v);
+	def.enableSpring = on(v, 15);
+	def.hertz = ff(v, 16);
+	def.dampingRatio = ff(v, 17);
+	def.targetTranslation = ff(v, 18);
+	def.enableLimit = on(v, 19);
+	def.lowerTranslation = ff(v, 20);
+	def.upperTranslation = ff(v, 21);
+	def.enableMotor = on(v, 22);
+	def.maxMotorForce = ff(v, 23);
+	def.motorSpeed = ff(v, 24);
+	return joint_keep(w, b3CreatePrismaticJoint(w->id, &def));
+}
+
+/*
+	A ball and socket: the two points stay together and the turning is
+	free, or limited to a cone and a twist within it. Every joint of a
+	ragdoll is one of these, and the cone and twist are what stop a limb
+	folding the wrong way.
+*/
+HL_PRIM int HL_NAME(joint_spherical)(hb_world *w, int a, int b, vbyte *v) {
+	b3SphericalJointDef def = b3DefaultSphericalJointDef();
+	joint_base(&def.base, w, a, b, v);
+	def.enableSpring = on(v, 15);
+	def.hertz = ff(v, 16);
+	def.dampingRatio = ff(v, 17);
+	def.targetRotation = (b3Quat){ { ff(v, 18), ff(v, 19), ff(v, 20) }, ff(v, 21) };
+	def.enableConeLimit = on(v, 22);
+	def.coneAngle = ff(v, 23);
+	def.enableTwistLimit = on(v, 24);
+	def.lowerTwistAngle = ff(v, 25);
+	def.upperTwistAngle = ff(v, 26);
+	def.enableMotor = on(v, 27);
+	def.maxMotorTorque = ff(v, 28);
+	def.motorVelocity = v3(v, 29);
+	return joint_keep(w, b3CreateSphericalJoint(w->id, &def));
+}
+
+/*
+	Two bodies held as one, stiffly or springily. A hertz of zero on
+	either half is rigid; anything else is a thing that can be bent and
+	broken off, which is what this is usually for.
+*/
+HL_PRIM int HL_NAME(joint_weld)(hb_world *w, int a, int b, vbyte *v) {
+	b3WeldJointDef def = b3DefaultWeldJointDef();
+	joint_base(&def.base, w, a, b, v);
+	def.linearHertz = ff(v, 15);
+	def.angularHertz = ff(v, 16);
+	def.linearDampingRatio = ff(v, 17);
+	def.angularDampingRatio = ff(v, 18);
+	return joint_keep(w, b3CreateWeldJoint(w->id, &def));
+}
+
+/*
+	Not a joint so much as a way of driving one body towards another
+	under a force limit: it asks for a velocity and pushes as hard as it
+	is allowed to. This is how a thing is dragged by the mouse without
+	it going through walls, and how a platform is moved without being
+	kinematic.
+*/
+HL_PRIM int HL_NAME(joint_motor)(hb_world *w, int a, int b, vbyte *v) {
+	b3MotorJointDef def = b3DefaultMotorJointDef();
+	joint_base(&def.base, w, a, b, v);
+	def.linearVelocity = v3(v, 15);
+	def.maxVelocityForce = ff(v, 18);
+	def.angularVelocity = v3(v, 19);
+	def.maxVelocityTorque = ff(v, 22);
+	def.linearHertz = ff(v, 23);
+	def.linearDampingRatio = ff(v, 24);
+	def.maxSpringForce = ff(v, 25);
+	def.angularHertz = ff(v, 26);
+	def.angularDampingRatio = ff(v, 27);
+	def.maxSpringTorque = ff(v, 28);
+	return joint_keep(w, b3CreateMotorJoint(w->id, &def));
+}
+
+/*
+	A wheel on a suspension that can steer and be driven. Box3D's
+	strongest single joint and the reason a car is buildable here without
+	a vehicle model: the spring and its limits are the suspension, the
+	spin motor is the engine, and the steering is a second motor about a
+	second axis.
+
+	It is still a joint and not a car. There are no tyre friction curves,
+	no engine, no gearbox and no differential; those are written on top,
+	in the game, out of these.
+*/
+HL_PRIM int HL_NAME(joint_wheel)(hb_world *w, int a, int b, vbyte *v) {
+	b3WheelJointDef def = b3DefaultWheelJointDef();
+	joint_base(&def.base, w, a, b, v);
+	def.enableSuspensionSpring = on(v, 15);
+	def.suspensionHertz = ff(v, 16);
+	def.suspensionDampingRatio = ff(v, 17);
+	def.enableSuspensionLimit = on(v, 18);
+	def.lowerSuspensionLimit = ff(v, 19);
+	def.upperSuspensionLimit = ff(v, 20);
+	def.enableSpinMotor = on(v, 21);
+	def.maxSpinTorque = ff(v, 22);
+	def.spinSpeed = ff(v, 23);
+	def.enableSteering = on(v, 24);
+	def.steeringHertz = ff(v, 25);
+	def.steeringDampingRatio = ff(v, 26);
+	def.targetSteeringAngle = ff(v, 27);
+	def.maxSteeringTorque = ff(v, 28);
+	def.enableSteeringLimit = on(v, 29);
+	def.lowerSteeringLimit = ff(v, 30);
+	def.upperSteeringLimit = ff(v, 31);
+	return joint_keep(w, b3CreateWheelJoint(w->id, &def));
+}
+
+/*
+	Two bodies kept pointing the same way while their positions are left
+	alone. What keeps a hovering thing upright, and what keeps a camera
+	arm level with the horizon.
+*/
+HL_PRIM int HL_NAME(joint_parallel)(hb_world *w, int a, int b, vbyte *v) {
+	b3ParallelJointDef def = b3DefaultParallelJointDef();
+	joint_base(&def.base, w, a, b, v);
+	def.hertz = ff(v, 15);
+	def.dampingRatio = ff(v, 16);
+	def.maxTorque = ff(v, 17);
+	return joint_keep(w, b3CreateParallelJoint(w->id, &def));
+}
+
+/*
+	A joint that holds nothing together and exists to stop two bodies
+	colliding. The cheap way to let the parts of one ragdoll pass through
+	each other without giving every shape on it a filter of its own.
+*/
+HL_PRIM int HL_NAME(joint_filter)(hb_world *w, int a, int b, vbyte *v) {
+	b3FilterJointDef def = b3DefaultFilterJointDef();
+	joint_base(&def.base, w, a, b, v);
+	return joint_keep(w, b3CreateFilterJoint(w->id, &def));
+}
+
+HL_PRIM void HL_NAME(joint_remove)(hb_world *w, int id, bool wake) {
+	b3JointId j = joint_of(w, id);
+	if( !joint_ok(j) ) return;
+	b3DestroyJoint(j, wake);
+	hb_drop(&w->joints, id);
+}
+
+/*
+	The motor on whichever kind of joint this is: whether it is on, how
+	fast it drives, and how hard it may push or twist to get there.
+
+	A joint with no motor is left alone rather than complaining, so a
+	scene can turn every motor it made on in one loop.
+*/
+HL_PRIM void HL_NAME(joint_set_motor)(hb_world *w, int id, bool enable, double speed,
+		double max_force) {
+	b3JointId j = joint_of(w, id);
+	if( !joint_ok(j) ) return;
+	switch( b3Joint_GetType(j) ) {
+	case b3_distanceJoint:
+		b3DistanceJoint_EnableMotor(j, enable);
+		b3DistanceJoint_SetMotorSpeed(j, (float)speed);
+		b3DistanceJoint_SetMaxMotorForce(j, (float)max_force);
+		break;
+	case b3_revoluteJoint:
+		b3RevoluteJoint_EnableMotor(j, enable);
+		b3RevoluteJoint_SetMotorSpeed(j, (float)speed);
+		b3RevoluteJoint_SetMaxMotorTorque(j, (float)max_force);
+		break;
+	case b3_prismaticJoint:
+		b3PrismaticJoint_EnableMotor(j, enable);
+		b3PrismaticJoint_SetMotorSpeed(j, (float)speed);
+		b3PrismaticJoint_SetMaxMotorForce(j, (float)max_force);
+		break;
+	case b3_sphericalJoint:
+		b3SphericalJoint_EnableMotor(j, enable);
+		b3SphericalJoint_SetMaxMotorTorque(j, (float)max_force);
+		break;
+	case b3_wheelJoint:
+		b3WheelJoint_EnableSpinMotor(j, enable);
+		b3WheelJoint_SetSpinMotorSpeed(j, (float)speed);
+		b3WheelJoint_SetMaxSpinTorque(j, (float)max_force);
+		break;
+	default:
+		break;
+	}
+}
+
+/*
+	The spring on whichever kind of joint this is: how stiff, and how
+	quickly it stops ringing. Hertz is how many times a second it would
+	swing if nothing damped it; a damping of one is the point where it
+	stops swinging at all.
+*/
+HL_PRIM void HL_NAME(joint_set_spring)(hb_world *w, int id, bool enable, double hertz,
+		double damping) {
+	b3JointId j = joint_of(w, id);
+	if( !joint_ok(j) ) return;
+	switch( b3Joint_GetType(j) ) {
+	case b3_distanceJoint:
+		b3DistanceJoint_EnableSpring(j, enable);
+		b3DistanceJoint_SetSpringHertz(j, (float)hertz);
+		b3DistanceJoint_SetSpringDampingRatio(j, (float)damping);
+		break;
+	case b3_revoluteJoint:
+		b3RevoluteJoint_EnableSpring(j, enable);
+		b3RevoluteJoint_SetSpringHertz(j, (float)hertz);
+		b3RevoluteJoint_SetSpringDampingRatio(j, (float)damping);
+		break;
+	case b3_prismaticJoint:
+		b3PrismaticJoint_EnableSpring(j, enable);
+		b3PrismaticJoint_SetSpringHertz(j, (float)hertz);
+		b3PrismaticJoint_SetSpringDampingRatio(j, (float)damping);
+		break;
+	case b3_sphericalJoint:
+		b3SphericalJoint_EnableSpring(j, enable);
+		b3SphericalJoint_SetSpringHertz(j, (float)hertz);
+		b3SphericalJoint_SetSpringDampingRatio(j, (float)damping);
+		break;
+	case b3_parallelJoint:
+		b3ParallelJoint_SetSpringHertz(j, (float)hertz);
+		b3ParallelJoint_SetSpringDampingRatio(j, (float)damping);
+		break;
+	case b3_weldJoint:
+		b3WeldJoint_SetLinearHertz(j, (float)hertz);
+		b3WeldJoint_SetAngularHertz(j, (float)hertz);
+		b3WeldJoint_SetLinearDampingRatio(j, (float)damping);
+		b3WeldJoint_SetAngularDampingRatio(j, (float)damping);
+		break;
+	case b3_wheelJoint:
+		b3WheelJoint_EnableSuspension(j, enable);
+		b3WheelJoint_SetSuspensionHertz(j, (float)hertz);
+		b3WheelJoint_SetSuspensionDampingRatio(j, (float)damping);
+		break;
+	default:
+		break;
+	}
+}
+
+/*
+	How far the joint may go: an angle for a hinge, a distance for a
+	slider or a rope, a cone for a ball and socket. The two numbers mean
+	what the joint's own units are, and a joint with no limit ignores
+	them.
+*/
+HL_PRIM void HL_NAME(joint_set_limit)(hb_world *w, int id, bool enable, double lower,
+		double upper) {
+	b3JointId j = joint_of(w, id);
+	if( !joint_ok(j) ) return;
+	switch( b3Joint_GetType(j) ) {
+	case b3_distanceJoint:
+		b3DistanceJoint_EnableLimit(j, enable);
+		b3DistanceJoint_SetLengthRange(j, (float)lower, (float)upper);
+		break;
+	case b3_revoluteJoint:
+		b3RevoluteJoint_EnableLimit(j, enable);
+		b3RevoluteJoint_SetLimits(j, (float)lower, (float)upper);
+		break;
+	case b3_prismaticJoint:
+		b3PrismaticJoint_EnableLimit(j, enable);
+		b3PrismaticJoint_SetLimits(j, (float)lower, (float)upper);
+		break;
+	case b3_sphericalJoint:
+		/* Lower is the cone's half-angle; upper the twist either way. */
+		b3SphericalJoint_EnableConeLimit(j, enable);
+		b3SphericalJoint_SetConeLimit(j, (float)lower);
+		b3SphericalJoint_EnableTwistLimit(j, enable);
+		b3SphericalJoint_SetTwistLimits(j, -(float)upper, (float)upper);
+		break;
+	case b3_wheelJoint:
+		b3WheelJoint_EnableSuspensionLimit(j, enable);
+		b3WheelJoint_SetSuspensionLimits(j, (float)lower, (float)upper);
+		break;
+	default:
+		break;
+	}
+}
+
+/*
+	Where the joint should be resting, for the kinds that have somewhere
+	to rest: the angle a sprung hinge is pulled towards, the length a
+	rope wants to be, the place along a slider a spring holds.
+*/
+HL_PRIM void HL_NAME(joint_set_target)(hb_world *w, int id, double value) {
+	b3JointId j = joint_of(w, id);
+	if( !joint_ok(j) ) return;
+	switch( b3Joint_GetType(j) ) {
+	case b3_distanceJoint: b3DistanceJoint_SetLength(j, (float)value); break;
+	case b3_revoluteJoint: b3RevoluteJoint_SetTargetAngle(j, (float)value); break;
+	case b3_prismaticJoint: b3PrismaticJoint_SetTargetTranslation(j, (float)value); break;
+	case b3_wheelJoint: b3WheelJoint_SetTargetSteeringAngle(j, (float)value); break;
+	default: break;
+	}
+}
+
+/*
+	The steering half of a wheel joint, which nothing else has: whether
+	it steers, where to, and how hard it may twist to get there.
+*/
+HL_PRIM void HL_NAME(joint_set_steering)(hb_world *w, int id, bool enable, double angle,
+		double max_torque) {
+	b3JointId j = joint_of(w, id);
+	if( !joint_ok(j) || b3Joint_GetType(j) != b3_wheelJoint ) return;
+	b3WheelJoint_EnableSteering(j, enable);
+	b3WheelJoint_SetTargetSteeringAngle(j, (float)angle);
+	b3WheelJoint_SetMaxSteeringTorque(j, (float)max_torque);
+}
+
+/*
+	Where the joint is and what it is carrying, all at once, because a
+	game that draws a dial for one of these wants the lot.
+
+	Six f32 out: how far it has moved or turned, how fast, the force and
+	the torque the joint is carrying, and how far the two bodies have
+	been pulled apart in spite of it - the last of which is how a game
+	knows a joint is about to break.
+*/
+HL_PRIM void HL_NAME(joint_read)(hb_world *w, int id, vbyte *out) {
+	b3JointId j = joint_of(w, id);
+	memset(out, 0, 6 * sizeof(float));
+	if( !joint_ok(j) ) return;
+	float position = 0.0f, speed = 0.0f;
+	switch( b3Joint_GetType(j) ) {
+	case b3_distanceJoint:
+		position = b3DistanceJoint_GetCurrentLength(j);
+		break;
+	case b3_revoluteJoint:
+		position = b3RevoluteJoint_GetAngle(j);
+		speed = b3RevoluteJoint_GetMotorSpeed(j);
+		break;
+	case b3_prismaticJoint:
+		position = b3PrismaticJoint_GetTranslation(j);
+		speed = b3PrismaticJoint_GetSpeed(j);
+		break;
+	case b3_sphericalJoint:
+		position = b3SphericalJoint_GetTwistAngle(j);
+		break;
+	case b3_wheelJoint:
+		position = b3WheelJoint_GetSteeringAngle(j);
+		speed = b3WheelJoint_GetSpinSpeed(j);
+		break;
+	default:
+		break;
+	}
+	b3Vec3 force = b3Joint_GetConstraintForce(j);
+	b3Vec3 torque = b3Joint_GetConstraintTorque(j);
+	put(out, 0, position);
+	put(out, 1, speed);
+	put(out, 2, sqrtf(force.x * force.x + force.y * force.y + force.z * force.z));
+	put(out, 3, sqrtf(torque.x * torque.x + torque.y * torque.y + torque.z * torque.z));
+	put(out, 4, b3Joint_GetLinearSeparation(j));
+	put(out, 5, b3Joint_GetAngularSeparation(j));
+}
+
+DEFINE_PRIM(_I32, joint_distance, _WORLD _I32 _I32 _BYTES);
+DEFINE_PRIM(_I32, joint_revolute, _WORLD _I32 _I32 _BYTES);
+DEFINE_PRIM(_I32, joint_prismatic, _WORLD _I32 _I32 _BYTES);
+DEFINE_PRIM(_I32, joint_spherical, _WORLD _I32 _I32 _BYTES);
+DEFINE_PRIM(_I32, joint_weld, _WORLD _I32 _I32 _BYTES);
+DEFINE_PRIM(_I32, joint_motor, _WORLD _I32 _I32 _BYTES);
+DEFINE_PRIM(_I32, joint_wheel, _WORLD _I32 _I32 _BYTES);
+DEFINE_PRIM(_I32, joint_parallel, _WORLD _I32 _I32 _BYTES);
+DEFINE_PRIM(_I32, joint_filter, _WORLD _I32 _I32 _BYTES);
+DEFINE_PRIM(_VOID, joint_remove, _WORLD _I32 _BOOL);
+DEFINE_PRIM(_VOID, joint_set_motor, _WORLD _I32 _BOOL _F64 _F64);
+DEFINE_PRIM(_VOID, joint_set_spring, _WORLD _I32 _BOOL _F64 _F64);
+DEFINE_PRIM(_VOID, joint_set_limit, _WORLD _I32 _BOOL _F64 _F64);
+DEFINE_PRIM(_VOID, joint_set_target, _WORLD _I32 _F64);
+DEFINE_PRIM(_VOID, joint_set_steering, _WORLD _I32 _BOOL _F64 _F64);
+DEFINE_PRIM(_VOID, joint_read, _WORLD _I32 _BYTES);
+
+/*
+	The two frames worked out from a point and an axis in the world.
+
+	Every joint above is defined by where it sits on each of the two
+	bodies and how it is turned there, and getting those right by hand is
+	most of the work of building one. What anybody actually knows is
+	simpler: the hinge is at this point, and it turns about this axis.
+
+	So this takes those, and answers with the fifteen floats the base of
+	every definition begins with.
+
+	In: the point, then the main axis, then the second one. Out: the
+	fifteen. The last of them is
+	left at zero, which means the two bodies still collide - the caller
+	sets it, because a hinge usually wants it off and a rope usually
+	wants it on.
+*/
+static b3Vec3 unit(b3Vec3 v) {
+	float n = sqrtf(v.x * v.x + v.y * v.y + v.z * v.z);
+	if( n < 1e-8f ) return (b3Vec3){ 1.0f, 0.0f, 0.0f };
+	return (b3Vec3){ v.x / n, v.y / n, v.z / n };
+}
+
+/*
+	A rotation with its z along `z` and its x along `x`, either of which
+	may be given as nothing and chosen here.
+
+	Both are needed because Box3D does not use one axis for everything.
+	A hinge turns about the frame's z, a cone leans about z and a twist
+	turns about it, and two bodies are kept parallel by their z. But a
+	slider slides along the frame's x, and a wheel does both at once:
+	its suspension moves along x while the wheel spins about z.
+
+	The x given is squared up against z rather than trusted, so a caller
+	may hand over two axes that are only roughly at right angles - which
+	is what a car built by hand has.
+*/
+static b3Quat frame_from_axes(b3Vec3 z, b3Vec3 x) {
+	b3Matrix3 m;
+	m.cz = unit(z);
+
+	/* What is left of x once the part along z is taken out of it. */
+	float along = x.x * m.cz.x + x.y * m.cz.y + x.z * m.cz.z;
+	b3Vec3 flat = { x.x - along * m.cz.x, x.y - along * m.cz.y, x.z - along * m.cz.z };
+	float n = sqrtf(flat.x * flat.x + flat.y * flat.y + flat.z * flat.z);
+	if( n < 1e-6f ) {
+		/*
+			Nothing usable was given, so anything perpendicular will do.
+			Crossing z with whichever world axis it leans on least keeps
+			the result well away from zero.
+		*/
+		b3Vec3 other = fabsf(m.cz.x) < 0.9f ? (b3Vec3){ 1.0f, 0.0f, 0.0f }
+			: (b3Vec3){ 0.0f, 1.0f, 0.0f };
+		flat = b3Cross(other, m.cz);
+	}
+	m.cx = unit(flat);
+	m.cy = b3Cross(m.cz, m.cx);
+	return b3MakeQuatFromMatrix(&m);
+}
+
+HL_PRIM void HL_NAME(joint_frames)(hb_world *w, int a, int b, vbyte *v, vbyte *out) {
+	b3BodyId ba = body_of(w, a);
+	b3BodyId bb = body_of(w, b);
+	b3Pos anchor = { ff(v, 0), ff(v, 1), ff(v, 2) };
+	b3Vec3 zaxis = v3(v, 3);
+	b3Vec3 xaxis = v3(v, 6);
+
+	memset(out, 0, 15 * sizeof(float));
+	if( !body_ok(ba) || !body_ok(bb) ) {
+		put(out, 6, 1.0f);
+		put(out, 13, 1.0f);
+		return;
+	}
+
+	b3Quat qa = frame_from_axes(b3Body_GetLocalVector(ba, zaxis), b3Body_GetLocalVector(ba, xaxis));
+	b3Quat qb = frame_from_axes(b3Body_GetLocalVector(bb, zaxis), b3Body_GetLocalVector(bb, xaxis));
+	put3(out, 0, b3Body_GetLocalPoint(ba, anchor));
+	put3(out, 3, qa.v);
+	put(out, 6, qa.s);
+	put3(out, 7, b3Body_GetLocalPoint(bb, anchor));
+	put3(out, 10, qb.v);
+	put(out, 13, qb.s);
+}
+
+DEFINE_PRIM(_VOID, joint_frames, _WORLD _I32 _I32 _BYTES _BYTES);

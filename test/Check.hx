@@ -31,6 +31,9 @@ class Check {
 		casts();
 		materials();
 		blast();
+		joints();
+		ropes();
+		filters();
 		Sys.println(failures == 0 ? "all good" : '$failures failed');
 		Sys.exit(failures);
 	}
@@ -180,6 +183,99 @@ class Check {
 
 		is("a blast pushes things away", near1.x > 1.1 ? 1 : 0, 1);
 		is("and the near one further than the far", (near1.x - 1) > (far.x - 4) ? 1 : 0, 1);
+
+		world.dispose();
+	}
+
+	/**
+		Joints, which are the part most likely to be wrong: the two frames
+		are worked out from a point and an axis by arithmetic nobody can
+		check by reading it. So each of these puts a joint under gravity
+		and looks at where the thing ends up.
+	**/
+	static function joints() {
+		final world = level();
+
+		// A door on a vertical hinge. Turning about z is free; everything
+		// else the hinge holds, so gravity should not move it at all.
+		final frame = world.add(Static, 0, 0, 5);
+		final door = world.addBox(1, 0.1, 0.8, 1, 0, 5);
+		world.hinge(frame, door, 0, 0, 5, 0, 0, 1);
+		for (n in 0...180) world.step(STEP);
+		door.read();
+		near("a hinge holds a door up against gravity", door.z, 5, 0.02);
+		near("and does not let it slide off", door.x * door.x + door.y * door.y, 1, 0.05);
+
+		// The same hinge, driven. It should turn about z and stay level.
+		final frame2 = world.add(Static, 20, 0, 5);
+		final door2 = world.addBox(1, 0.1, 0.8, 21, 0, 5);
+		final motor = world.hinge(frame2, door2, 20, 0, 5, 0, 0, 1);
+		motor.motor(3.0, 2000);
+		for (n in 0...60) world.step(STEP);
+		door2.read();
+		is("a motor turns the hinge", Math.abs(door2.y) > 0.3 ? 1 : 0, 1);
+		near("and it stays on its axis", door2.z, 5, 0.02);
+
+		// And with a limit on, it should barely move.
+		final frame3 = world.add(Static, 40, 0, 5);
+		final door3 = world.addBox(1, 0.1, 0.8, 41, 0, 5);
+		final stopped = world.hinge(frame3, door3, 40, 0, 5, 0, 0, 1);
+		stopped.limit(-0.05, 0.05);
+		stopped.motor(3.0, 2000);
+		for (n in 0...60) world.step(STEP);
+		door3.read();
+		is("a limit stops it", Math.abs(door3.y) < 0.2 ? 1 : 0, 1);
+
+		world.dispose();
+	}
+
+	/** A rope should hold its length, and a slider its one direction. **/
+	static function ropes() {
+		final world = level();
+
+		// The rope holds the two anchor points apart, not the two centres.
+		// The point given is on the hook at z = 9 and at the ball's own
+		// centre, so the ball settles four metres below nine, not below ten.
+		final hook = world.add(Static, 0, 0, 10);
+		final ball = world.addSphere(0.2, 0, 0, 9);
+		world.rope(hook, ball, 0, 0, 9, 4);
+		for (n in 0...300) world.step(STEP);
+		ball.read();
+		near("a rope holds its length", ball.z, 5, 0.05);
+		near("and hangs straight down", ball.x, 0, 0.05);
+
+		// A slider along z: it may fall, but only straight, and only as
+		// far as its limit.
+		final rail = world.add(Static, 20, 0, 10);
+		final car = world.addBox(0.3, 0.3, 0.3, 20, 0, 10);
+		final slide = world.slider(rail, car, 20, 0, 10, 0, 0, 1);
+		slide.limit(-2, 0);
+		for (n in 0...300) world.step(STEP);
+		car.read();
+		near("a slider stops at its limit", car.z, 8, 0.05);
+		near("without wandering sideways", car.x, 20, 0.01);
+
+		world.dispose();
+	}
+
+	/** Two bodies told not to collide should sit inside one another. **/
+	static function filters() {
+		final world = level();
+		final a = world.addBox(0.5, 0.5, 0.5, 0, 0, 3, Static);
+		final b = world.addBox(0.5, 0.5, 0.5, 0.1, 0, 3);
+		b.gravityFactor(0);
+		world.noCollide(a, b);
+		for (n in 0...120) world.step(STEP);
+		b.read();
+		near("a filter joint lets two overlap", b.x, 0.1, 0.02);
+
+		// Without one, the same pair pushes itself apart.
+		final c = world.addBox(0.5, 0.5, 0.5, 20, 0, 3, Static);
+		final d = world.addBox(0.5, 0.5, 0.5, 20.1, 0, 3);
+		d.gravityFactor(0);
+		for (n in 0...120) world.step(STEP);
+		d.read();
+		is("and without one they push apart", d.x > 20.5 ? 1 : 0, 1);
 
 		world.dispose();
 	}

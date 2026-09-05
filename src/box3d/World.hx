@@ -306,6 +306,223 @@ class World {
 		Native.world_explode(w, floats);
 	}
 
+	// --- joints ------------------------------------------------------------
+
+	/*
+		Each of these takes a point in the world where the joint sits, and
+		where it means anything an axis it works about. Box3D wants a frame
+		on each body instead - a place and a rotation, in that body's own
+		coordinates - and working those out is the fiddly half of building
+		a joint, so the shim does it: `joint_frames` turns a point and an
+		axis into the fifteen floats every definition begins with.
+
+		The axis becomes the frame's x. A hinge turns about it, a slider
+		slides along it, a wheel spins about it.
+
+		Bodies joined together usually should not collide, and that is the
+		default here. A rope is the exception, because two things on the
+		ends of one ought to be able to hit each other.
+	**/
+
+	/** Every joint in the world, in the order they were made. **/
+	public var joints(default, null):Array<Joint> = [];
+
+	/**
+		A hinge: one turn about the axis and nothing else.
+
+		A door, a lid, a hatch, a wheel that does not steer, an elbow. Add
+		`limit` to stop it going round for ever, and `motor` to drive it.
+
+		```haxe
+		final hinge = world.hinge(frame, door, 0, 0, 1, 0, 0, 1);
+		hinge.limit(0, 1.9);            // opens one way, ninety degrees
+		hinge.motor(2.0, 400);          // and swings itself open
+		```
+	**/
+	public function hinge(a:Body, b:Body, x:Float, y:Float, z:Float, axisX = 0.0, axisY = 0.0,
+			axisZ = 1.0, collide = false):Joint {
+		// The hinge turns about the frame's z, so the axis given is that.
+		frames(a, b, x, y, z, axisX, axisY, axisZ, 0, 0, 0, collide);
+		// Nothing enabled: a bare hinge turns freely, and the rest is asked for.
+		for (i in 15...25) floats.setF32(i * 4, 0);
+		return keepJoint(Native.joint_revolute(w, a.id, b.id, floats), a, b);
+	}
+
+	/**
+		A slider: movement along the axis and nothing else, no turning.
+		A piston, a drawer, a lift, a sliding door.
+	**/
+	public function slider(a:Body, b:Body, x:Float, y:Float, z:Float, axisX = 0.0, axisY = 0.0,
+			axisZ = 1.0, collide = false):Joint {
+		// A slider slides along the frame's x, not its z.
+		frames(a, b, x, y, z, 0, 0, 0, axisX, axisY, axisZ, collide);
+		for (i in 15...25) floats.setF32(i * 4, 0);
+		return keepJoint(Native.joint_prismatic(w, a.id, b.id, floats), a, b);
+	}
+
+	/**
+		A ball and socket: the point holds, the turning is free.
+
+		Every joint of a ragdoll is one of these. `limit` then gives it a
+		cone to lean within and a twist to turn inside that, which is what
+		stops a limb folding the wrong way.
+	**/
+	public function ball(a:Body, b:Body, x:Float, y:Float, z:Float, collide = false):Joint {
+		frames(a, b, x, y, z, 0, 0, 1, 0, 0, 0, collide);
+		for (i in 15...32) floats.setF32(i * 4, 0);
+		floats.setF32(21 * 4, 1); // the target rotation, which is no rotation
+		return keepJoint(Native.joint_spherical(w, a.id, b.id, floats), a, b);
+	}
+
+	/**
+		A rope or a spring between two points on two bodies, holding them
+		`length` apart.
+
+		The two ends may hit each other, unlike everything else here: two
+		things on the ends of a rope ought to be able to.
+
+		`limit` turns it into a range rather than a fixed length, which is
+		a rope that may sag; `spring` makes it springy; `motor` makes it a
+		winch.
+	**/
+	public function rope(a:Body, b:Body, x:Float, y:Float, z:Float, length:Float,
+			collide = true):Joint {
+		frames(a, b, x, y, z, 0, 0, 1, 0, 0, 0, collide);
+		for (i in 15...25) floats.setF32(i * 4, 0);
+		floats.setF32(15 * 4, length);
+		return keepJoint(Native.joint_distance(w, a.id, b.id, floats), a, b);
+	}
+
+	/**
+		Two bodies held as one.
+
+		A `hertz` of zero on either half is rigid. Anything else is a thing
+		that bends before it gives, which is what this is usually for: a
+		part welded on that can be knocked off, read through the joint's
+		own `separation`.
+	**/
+	public function weld(a:Body, b:Body, x:Float, y:Float, z:Float, linearHertz = 0.0,
+			angularHertz = 0.0, damping = 1.0, collide = false):Joint {
+		frames(a, b, x, y, z, 0, 0, 1, 0, 0, 0, collide);
+		floats.setF32(15 * 4, linearHertz);
+		floats.setF32(16 * 4, angularHertz);
+		floats.setF32(17 * 4, damping);
+		floats.setF32(18 * 4, damping);
+		return keepJoint(Native.joint_weld(w, a.id, b.id, floats), a, b);
+	}
+
+	/**
+		A wheel on a suspension that can steer and be driven.
+
+		The only joint here that needs two axes, because it does two things
+		at once: the wheel spins about `spin` - its axle, pointing out of
+		the side of the car - while the suspension moves along `travel`,
+		which is up.
+
+		This is the strongest single thing Box3D has, and the reason a car
+		is buildable without a vehicle model: `spring` and `limit` are the
+		suspension, `motor` is the engine, `steering` turns it.
+
+		```haxe
+		final w = world.wheel(chassis, tyre, x, y, z);
+		w.spring(4, 0.7).limit(-0.3, 0.1);   // soft, 40 cm of travel
+		w.motor(20, 800);                    // driven
+		w.steering(0.4, 2000);               // and turned
+		```
+
+		It is still a joint and not a car. Tyre grip curves, an engine, a
+		gearbox and a differential are written on top of these, in the
+		game.
+	**/
+	public function wheel(chassis:Body, tyre:Body, x:Float, y:Float, z:Float, spinX = 0.0,
+			spinY = 1.0, spinZ = 0.0, travelX = 0.0, travelY = 0.0, travelZ = 1.0,
+			collide = false):Joint {
+		frames(chassis, tyre, x, y, z, spinX, spinY, spinZ, travelX, travelY, travelZ, collide);
+		for (i in 15...32) floats.setF32(i * 4, 0);
+		return keepJoint(Native.joint_wheel(w, chassis.id, tyre.id, floats), chassis, tyre);
+	}
+
+	/**
+		Keeps two bodies pointing the same way and leaves their positions
+		alone. What holds a hovering thing upright, and what keeps a camera
+		arm level.
+	**/
+	public function parallel(a:Body, b:Body, hertz = 5.0, damping = 1.0, maxTorque = 1000.0,
+			collide = false):Joint {
+		frames(a, b, 0, 0, 0, 0, 0, 1, 0, 0, 0, collide);
+		floats.setF32(15 * 4, hertz);
+		floats.setF32(16 * 4, damping);
+		floats.setF32(17 * 4, maxTorque);
+		return keepJoint(Native.joint_parallel(w, a.id, b.id, floats), a, b);
+	}
+
+	/**
+		Drives one body towards a velocity under a force limit, without
+		holding it anywhere.
+
+		This is how a thing is dragged by the mouse without going through
+		walls, and how a platform is moved that has to be pushed back by
+		what it pushes.
+	**/
+	public function drive(a:Body, b:Body, maxForce = 1000.0, maxTorque = 1000.0,
+			collide = false):Joint {
+		frames(a, b, 0, 0, 0, 0, 0, 1, 0, 0, 0, collide);
+		for (i in 15...29) floats.setF32(i * 4, 0);
+		floats.setF32(18 * 4, maxForce);
+		floats.setF32(22 * 4, maxTorque);
+		return keepJoint(Native.joint_motor(w, a.id, b.id, floats), a, b);
+	}
+
+	/**
+		Holds nothing together and stops two bodies colliding.
+
+		The cheap way to let the parts of one ragdoll pass through each
+		other without giving every shape on it a filter of its own.
+	**/
+	public function noCollide(a:Body, b:Body):Joint {
+		frames(a, b, 0, 0, 0, 0, 0, 1, 0, 0, 0, false);
+		return keepJoint(Native.joint_filter(w, a.id, b.id, floats), a, b);
+	}
+
+	/**
+		Writes the fifteen floats every joint definition begins with.
+
+		Two axes, because Box3D does not use one for everything: a hinge
+		turns about the frame's z and a cone leans about it, but a slider
+		slides along the frame's x, and a wheel does both at once - its
+		suspension along x while it spins about z. Either may be left at
+		zero and one perpendicular to the other is chosen.
+	**/
+	function frames(a:Body, b:Body, x:Float, y:Float, z:Float, zx:Float, zy:Float, zz:Float,
+			xx:Float, xy:Float, xz:Float, collide:Bool) {
+		anchor.setF32(0, x);
+		anchor.setF32(4, y);
+		anchor.setF32(8, z);
+		anchor.setF32(12, zx);
+		anchor.setF32(16, zy);
+		anchor.setF32(20, zz);
+		anchor.setF32(24, xx);
+		anchor.setF32(28, xy);
+		anchor.setF32(32, xz);
+		Native.joint_frames(w, a.id, b.id, anchor, floats);
+		floats.setF32(14 * 4, collide ? 1 : 0);
+	}
+
+	/** A second small buffer, because `frames` reads one and writes the other. **/
+	final anchor = new hl.Bytes(9 * 4);
+
+	function keepJoint(id:Int, a:Body, b:Body):Joint {
+		if (id < 0) throw "box3d: the joint could not be made";
+		final j = new Joint(this, id, a, b);
+		joints.push(j);
+		return j;
+	}
+
+	@:allow(box3d)
+	function forgetJoint(j:Joint) {
+		joints.remove(j);
+	}
+
 	// --- asking ------------------------------------------------------------
 
 	/*

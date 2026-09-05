@@ -211,6 +211,87 @@ class Native {
 	/** Six f32: the wind, the drag, the lift, the top speed it acts up to. **/
 	public static function shape_wind(w:WorldPtr, id:Int, v:hl.Bytes):Void {}
 
+
+	// --- joints ------------------------------------------------------------
+
+	/*
+		Every definition begins with the same fifteen floats: where the
+		joint sits on each body and how it is turned there, then whether
+		the two still collide. What follows differs by kind, in the order
+		Box3D's own struct declares it.
+	*/
+
+	/** 25 f32: the base, length, spring, limit, motor. **/
+	public static function joint_distance(w:WorldPtr, a:Int, b:Int, v:hl.Bytes):Int {
+		return -1;
+	}
+
+	/** 25 f32: the base, target angle, spring, limit, motor. **/
+	public static function joint_revolute(w:WorldPtr, a:Int, b:Int, v:hl.Bytes):Int {
+		return -1;
+	}
+
+	/** 25 f32: the base, spring, target, limit, motor. **/
+	public static function joint_prismatic(w:WorldPtr, a:Int, b:Int, v:hl.Bytes):Int {
+		return -1;
+	}
+
+	/** 32 f32: the base, spring, target rotation, cone, twist, motor. **/
+	public static function joint_spherical(w:WorldPtr, a:Int, b:Int, v:hl.Bytes):Int {
+		return -1;
+	}
+
+	/** 19 f32: the base, then two hertz and two damping ratios. **/
+	public static function joint_weld(w:WorldPtr, a:Int, b:Int, v:hl.Bytes):Int {
+		return -1;
+	}
+
+	/** 29 f32: the base, the velocities it drives at and what it may spend. **/
+	public static function joint_motor(w:WorldPtr, a:Int, b:Int, v:hl.Bytes):Int {
+		return -1;
+	}
+
+	/** 32 f32: the base, suspension, spin motor, steering. **/
+	public static function joint_wheel(w:WorldPtr, a:Int, b:Int, v:hl.Bytes):Int {
+		return -1;
+	}
+
+	/** 18 f32: the base, hertz, damping, max torque. **/
+	public static function joint_parallel(w:WorldPtr, a:Int, b:Int, v:hl.Bytes):Int {
+		return -1;
+	}
+
+	/** 15 f32: the base alone. **/
+	public static function joint_filter(w:WorldPtr, a:Int, b:Int, v:hl.Bytes):Int {
+		return -1;
+	}
+
+	public static function joint_remove(w:WorldPtr, id:Int, wake:Bool):Void {}
+
+	public static function joint_set_motor(w:WorldPtr, id:Int, enable:Bool, speed:Float,
+			maxForce:Float):Void {}
+
+	public static function joint_set_spring(w:WorldPtr, id:Int, enable:Bool, hertz:Float,
+			damping:Float):Void {}
+
+	public static function joint_set_limit(w:WorldPtr, id:Int, enable:Bool, lower:Float,
+			upper:Float):Void {}
+
+	public static function joint_set_target(w:WorldPtr, id:Int, value:Float):Void {}
+
+	public static function joint_set_steering(w:WorldPtr, id:Int, enable:Bool, angle:Float,
+			maxTorque:Float):Void {}
+
+	/** Six f32 out: position, speed, force, torque, and the two separations. **/
+	public static function joint_read(w:WorldPtr, id:Int, out:hl.Bytes):Void {}
+
+	/**
+		Nine f32 in - a point, the main axis, and the second one, all in
+		the world - and the fifteen floats of a definition's base out.
+	**/
+	public static function joint_frames(w:WorldPtr, a:Int, b:Int, v:hl.Bytes,
+			out:hl.Bytes):Void {}
+
 	// --- meshes and hulls --------------------------------------------------
 
 	public static function hull_points(points:hl.Bytes, count:Int, maxVertices:Int):HullPtr {
