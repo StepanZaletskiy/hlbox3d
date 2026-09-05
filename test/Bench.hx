@@ -18,7 +18,9 @@ import box3d.World;
 
 	Two numbers come out. The cost of a step while the pile is falling,
 	which is the honest worst case, and the cost once it has stood still
-	for a while, which is what a game actually pays most frames.
+	for a while, which is what a game pays for a heap in a corner it is
+	not looking at. Sleeping is off, so the second number is a real solve
+	rather than a pile in bed.
 
 	Run it against the Jolt binding by pointing the same file at
 	`jolt.World`: the two classes take the same calls, which is the whole
@@ -52,6 +54,9 @@ class Bench {
 					bodies++;
 				}
 		}
+		// Nothing sleeps here. A solver is not to be praised for a cheap
+		// step it reached by doing nothing.
+		world.allowSleeping(false);
 		world.optimize();
 
 		final falling = time(world, FALLING);

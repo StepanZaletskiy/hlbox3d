@@ -154,6 +154,15 @@ HL_PRIM void HL_NAME(world_optimize)(hb_world *w) {
 	b3World_RebuildStaticTree(w->id);
 }
 
+/*
+	Whether a body that has stopped moving may be put to bed. On for a
+	game; off when timing, so that a solver is not praised for a cheap
+	step it reached by doing nothing.
+*/
+HL_PRIM void HL_NAME(world_enable_sleeping)(hb_world *w, bool allow) {
+	b3World_EnableSleeping(w->id, allow);
+}
+
 HL_PRIM int HL_NAME(world_active_count)(hb_world *w) {
 	return b3World_GetAwakeBodyCount(w->id);
 }
@@ -296,6 +305,7 @@ DEFINE_PRIM(_VOID, world_destroy, _WORLD);
 DEFINE_PRIM(_VOID, world_set_gravity, _WORLD _F64 _F64 _F64);
 DEFINE_PRIM(_I32, world_step, _WORLD _F64 _I32);
 DEFINE_PRIM(_VOID, world_optimize, _WORLD);
+DEFINE_PRIM(_VOID, world_enable_sleeping, _WORLD _BOOL);
 DEFINE_PRIM(_I32, world_active_count, _WORLD);
 DEFINE_PRIM(_I32, world_add_box, _WORLD _BYTES _I32);
 DEFINE_PRIM(_I32, world_add_sphere, _WORLD _BYTES _I32);

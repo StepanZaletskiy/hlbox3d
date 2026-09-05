@@ -98,6 +98,13 @@ class World {
 	public function step(dt:Float):Int
 		return Native.world_step(w, dt, substeps);
 
+	/**
+		Whether bodies that stop moving may be put to bed. On is Box3D's
+		own, and what a game wants; off is for timing.
+	**/
+	public function allowSleeping(allow:Bool)
+		Native.world_enable_sleeping(w, allow);
+
 	/** How many bodies are awake. **/
 	public var activeCount(get, never):Int;
 

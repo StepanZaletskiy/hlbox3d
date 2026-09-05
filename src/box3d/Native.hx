@@ -41,6 +41,9 @@ class Native {
 	/** Rebuilds the static tree. Once, after the level is in. **/
 	public static function world_optimize(w:WorldPtr):Void {}
 
+	/** Whether bodies that stop moving may be put to bed. **/
+	public static function world_enable_sleeping(w:WorldPtr, allow:Bool):Void {}
+
 	public static function world_active_count(w:WorldPtr):Int {
 		return 0;
 	}
