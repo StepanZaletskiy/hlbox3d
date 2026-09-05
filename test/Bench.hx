@@ -15,7 +15,7 @@ import box3d.World;
 	because one point does not show how a solver scales, and the two
 	libraries do not have to scale alike.
 
-		hl bench.hl [layers] [substeps]
+		hl bench.hl [layers] [substeps] [threads]
 
 	Everything that could tilt the comparison is nailed down. One thread.
 	The same fixed step. The same gravity. Boxes of the same size in the
@@ -49,9 +49,13 @@ class Bench {
 	static function main() {
 		final args = Sys.args();
 		final layers = args.length > 0 ? Std.parseInt(args[0]) : 15;
+		// Ways of parallel, counting the calling thread, so that this means
+		// the same on both libraries: Box3D is given the total, Jolt is
+		// given worker threads and works on the caller too.
+		final threads = args.length > 2 ? Std.parseInt(args[2]) : 1;
 
 		final count = Std.int(layers * (layers + 1) * (2 * layers + 1) / 6);
-		final world = new World(count + 16);
+		final world = new World(count + 16, threads);
 		world.setGravity(0, 0, -9.81);
 		if (args.length > 1) world.substeps = Std.parseInt(args[1]);
 
@@ -84,7 +88,7 @@ class Bench {
 		world.read(top);
 		final sag = round(1 + 2 * (layers - 1) - world.z);
 
-		Sys.println('box3d: $bodies boxes, $layers layers, ${world.substeps} substep(s)');
+		Sys.println('box3d: $bodies boxes, $layers layers, ${world.substeps} substep(s), $threads thread(s)');
 		Sys.println('  falling: ${round(falling)} ms/step');
 		Sys.println('  settled: ${round(settled)} ms/step, ${world.activeCount} awake');
 		Sys.println('  sag:     $sag m at the top');

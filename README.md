@@ -21,59 +21,77 @@ on. So: the same pyramid, the same step, one thread, both libraries.
 
 ## The number
 
-One machine, one thread, both libraries built by the same compiler, the
-same pyramid of two-metre boxes dropped onto a floor. Sleeping off, so
-that a library is not credited for a cheap step it reached by putting
-the pile to bed. Penetration slop set to 5 mm on both, because Jolt
-allows 2 cm by default and Box3D 5 mm, and over a stack that difference
-is centimetres of sag that belongs to neither solver.
+One machine, one thread each unless a row says otherwise, both libraries
+built by the same compiler, the same pyramid of two-metre boxes dropped
+onto a floor. Sleeping off, so that a library is not credited for a cheap
+step it reached by putting the pile to bed. Penetration slop set to 5 mm
+on both, because Jolt allows 2 cm by default and Box3D 5 mm, and over a
+stack that difference is centimetres of sag belonging to neither solver.
 
-The dial is different on each and cannot be made the same: Box3D solves
-a step over substeps and that is how it is asked for a firmer stack;
-Jolt runs the step once and turns its iterations. So both are run across
-their own range, and the columns are read by what they bought - the cost
-of a settled step, and how far the top box has sunk below where it
-should be standing.
+The dial is different on each and cannot be made the same: Box3D solves a
+step over substeps and that is how it is asked for a firmer stack; Jolt
+runs the step once per dial and turns ten velocity iterations inside each.
+So both are run across their own range and the rows are read by what they
+bought - the cost of a settled step, and how far the top box has sunk
+below where it should be standing. Two runs of the same configuration
+came out 3 to 5 per cent apart, which is the precision of everything
+below.
 
 1240 boxes, fifteen layers:
 
 | dial | jolt | box3d |
 |---|---|---|
-| 1 | **4.14 ms**, 6.7 cm | 4.16 ms, 11.8 cm |
-| 2 | 7.97 ms, 3.8 cm | **5.75 ms**, 3.2 cm |
-| 4 | 16.46 ms, 1.4 cm | **10.41 ms**, 0.7 cm |
+| 1 | 12.9 ms, 6.7 cm | **3.9 ms**, 11.8 cm |
+| 2 | 24.1 ms, 3.8 cm | **5.4 ms**, 3.2 cm |
+| 4 | 46.5 ms, 1.4 cm | **8.4 ms**, 0.7 cm |
 
 16206 boxes, thirty-six layers, which is Box3D's own showcase:
 
 | dial | jolt | box3d |
 |---|---|---|
-| 1 | **73.6 ms**, 21 cm | 130.1 ms, *collapsed* |
-| 2 | 134.8 ms, 16 cm | 159.9 ms, 17 cm |
-| 4 | 267.8 ms, 3.1 cm | **221.6 ms**, 4.8 cm |
+| 1 | 413 ms, 21 cm | **130 ms**, *collapsed* |
+| 2 | 734 ms, 16 cm | **160 ms**, 17 cm |
+| 4 | not run | 222 ms, 4.8 cm |
 
-Read by what was bought rather than by row. On the small pyramid the
-cheapest setting is a tie and Jolt's stack is the tighter of the two;
-past that Box3D buys the same firmness for about a third less. On the
-large one it goes the other way: Jolt reaches Box3D's two-substep
-firmness for half the price, and only at the tightest end is Box3D ahead
-again.
+Read across rather than down, matching firmness to firmness. At 3 cm of
+sag on the small pyramid, Box3D is four and a half times cheaper. At the
+tightest setting, five and a half. On the large one, at 16 to 21 cm, it
+is four and a half again.
 
-And across the two sizes, Jolt scales better. Thirteen times the bodies
-costs it sixteen times the step; Box3D twenty-one.
+Threads, on the small pyramid at matched firmness:
 
-So: Box3D is better at firm stacks of a few thousand bodies, by about
-half again. It is not faster in general, it is not a different class of
-thing, and on a large scene it is the slower of the two. Whoever said
-otherwise was not measuring this.
+| ways of parallel | jolt | box3d |
+|---|---|---|
+| 1 | 24.9 ms | **5.7 ms** |
+| 2 | 18.1 ms | **3.3 ms** |
+| 4 | 11.7 ms | **2.1 ms** |
+| 8 | 8.6 ms | **1.6 ms** |
+| 16 | 8.4 ms | **1.4 ms** |
 
-Two things this does not measure and should not be read as covering.
-Both libraries ran on one thread; Box3D's threading is deterministic
-across worker counts and Jolt makes no such promise, which is worth more
-than a benchmark to anyone shipping a networked game. And a pyramid is
-the one workload Box3D was built around and Jolt is weakest at. A game
-with a few hundred small things mostly asleep, a character and some
-raycasts is a different question, and this answers none of it.
+Box3D is ahead by four to six times at every width, and scales the
+better of the two besides: four times faster on sixteen ways where Jolt
+manages three and stops improving after eight.
 
+The gap has a cause and it is the thing Box3D was built for. To reach
+3 cm of sag Jolt runs twenty solver passes over the step and Box3D about
+four. Both arrive; one does five times the work to get there.
+
+### What this does not say
+
+Three earlier versions of this table were wrong, each because of a
+default in the Jolt binding rather than anything about Jolt. The contact
+buffers were fixed-size and silently overflowed on the large pyramid; the
+penetration slop differed fourfold between the libraries; and joltc reads
+a thread count of zero as "every core on the machine", so every run that
+believed it was single threaded was running on thirty-five workers. The
+numbers above are from after all three were fixed. Their existence is the
+argument for the sag column: a step that got cheaper while the pile came
+apart looks exactly like a fast solver.
+
+And a pyramid is one workload. It is the one Box3D was built around and
+the one Jolt is weakest at, and it says nothing about a scene of a few
+hundred small things mostly asleep, a character, and some raycasts -
+which is what the game actually runs. That measurement has not been made.
 ## What it binds so far
 
 A world, three shapes, bodies as ids, a step, and the transforms read
@@ -175,13 +193,22 @@ What Box3D does not have at all, and the game currently leans on:
   scenes are soft bodies.
 - **Ragdolls as a system.** There are joints, but no skeleton, no pose,
   and nothing like `DriveToPoseUsingMotors` - which is what makes the
-  puppet walk rather than hang.
+  puppet walk rather than hang. The samples ship a reference one -
+  `shared/human.c`, fourteen bones, joints with friction and a spring,
+  and motor anchors to drive them - so this is a port rather than an
+  invention.
 - **Buoyancy.** No counterpart, though for boxes and spheres this is an
   impulse from the submerged volume and is perhaps thirty lines.
 - **A vehicle model.** `b3WheelJoint` is a good one - suspension,
   steering, a limit, a spin motor - but it is a mechanical joint, not
   Jolt's vehicle: no tyre friction curves, no engine, gearbox or
   differential, no tracks. That part would be written by hand.
+- **Rollback.** Box3D says outright that a world cannot be set back to
+  a prior state and resumed: it caches contacts, warm-starting and sleep
+  state between steps, which is half of why it is quick. Jolt has
+  `SaveState` / `RestoreState` built for exactly that, though joltc does
+  not reach them either. This only matters to netcode that predicts and
+  rewinds; a server-authoritative game never asks for it.
 
 That list is the price of a move, and it is why this repository is a
 measurement before it is anything else.
