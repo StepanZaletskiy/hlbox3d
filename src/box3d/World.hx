@@ -130,6 +130,7 @@ class World {
 		body.qz = qz;
 		body.qw = qw;
 		bodies.push(body);
+		byBody[id] = body;
 		return body;
 	}
 
@@ -303,6 +304,223 @@ class World {
 		floats.setF32(16, falloff);
 		floats.setF32(20, impulse);
 		Native.world_explode(w, floats);
+	}
+
+	// --- asking ------------------------------------------------------------
+
+	/*
+		Queries answer into fields rather than into an object, for the same
+		reason bodies read into fields: a game asks a lot of these, and one
+		allocation per question is the collector's evening. `ray` fills the
+		seven below and says whether it hit anything at all.
+	*/
+
+	/** The shape the last query hit, and the body it belongs to. **/
+	public var hitShape(default, null):Shape;
+	public var hitBody(default, null):Body;
+
+	/** How far along the ray or sweep, from 0 at the start to 1 at the end. **/
+	public var hitAt = 0.0;
+
+	/** Where it hit. **/
+	public var hitX = 0.0;
+	public var hitY = 0.0;
+	public var hitZ = 0.0;
+
+	/** The normal of the surface there, pointing out of it. **/
+	public var hitNx = 0.0;
+	public var hitNy = 0.0;
+	public var hitNz = 0.0;
+
+	/**
+		Room for the answers. Sixty-four hits is more than a game reads in
+		one question; anything asking for more wants a different question.
+	**/
+	static inline var MAX_HITS = 64;
+
+	final results = new hl.Bytes(MAX_HITS * 8 * 4);
+
+	/** Bodies and shapes by the number the shim knows them by. **/
+	@:allow(box3d) final byBody:Array<Body> = [];
+	@:allow(box3d) final byShape:Array<Shape> = [];
+
+	/**
+		The nearest thing along a ray, from a point and along a vector whose
+		length is the length of the ray. A ray twenty metres forward is
+		`ray(x, y, z, 0, 20, 0)`, not a direction and a separate distance.
+
+		`category` is what the ray counts as and `mask` what it may hit,
+		as bit sets: a shape answers only if each is in the other's mask.
+		Left alone, the ray is everything and hits everything.
+
+		True if it hit, and then `hitShape` and the rest say what and
+		where.
+	**/
+	public function ray(x:Float, y:Float, z:Float, dx:Float, dy:Float, dz:Float, category = 1,
+			mask = -1):Bool {
+		writeRay(x, y, z, dx, dy, dz, category, mask);
+		if (!Native.world_ray(w, floats, results)) {
+			hitShape = null;
+			hitBody = null;
+			return false;
+		}
+		readHit(0);
+		return true;
+	}
+
+	/**
+		Everything along a ray rather than the nearest, up to sixty-four of
+		them. Returns how many; `hit(i)` then fills the fields for one.
+
+		They come back in whatever order the tree was walked, not near to
+		far. Sorting is the caller's business, and usually the caller
+		wanted the nearest anyway and should have asked `ray`.
+	**/
+	public function rayAll(x:Float, y:Float, z:Float, dx:Float, dy:Float, dz:Float, category = 1,
+			mask = -1):Int {
+		writeRay(x, y, z, dx, dy, dz, category, mask);
+		return Native.world_ray_all(w, floats, results, MAX_HITS);
+	}
+
+	/** Fills the hit fields from one of the answers `rayAll` collected. **/
+	public function hit(i:Int) {
+		readHit(i);
+	}
+
+	/**
+		A sphere swept along a path: what it would meet first, and how far
+		it got. This is how a thing is put down without it landing inside a
+		wall, and how a thrown crate is checked before it is thrown.
+	**/
+	public function castSphere(radius:Float, x:Float, y:Float, z:Float, dx:Float, dy:Float,
+			dz:Float, category = 1, mask = -1):Bool {
+		floats.setF32(0, x);
+		floats.setF32(4, y);
+		floats.setF32(8, z);
+		floats.setF32(12, 0);
+		floats.setF32(16, 0);
+		floats.setF32(20, 0);
+		floats.setF32(24, radius);
+		floats.setF32(28, dx);
+		floats.setF32(32, dy);
+		floats.setF32(36, dz);
+		floats.setI32(40, category);
+		floats.setI32(44, mask);
+		return finishCast(Native.world_cast(w, floats, 1, results));
+	}
+
+	/** The same with a capsule, given by its two ends relative to the origin. **/
+	public function castCapsule(x1:Float, y1:Float, z1:Float, x2:Float, y2:Float, z2:Float,
+			radius:Float, x:Float, y:Float, z:Float, dx:Float, dy:Float, dz:Float, category = 1,
+			mask = -1):Bool {
+		floats.setF32(0, x);
+		floats.setF32(4, y);
+		floats.setF32(8, z);
+		floats.setF32(12, x1);
+		floats.setF32(16, y1);
+		floats.setF32(20, z1);
+		floats.setF32(24, x2);
+		floats.setF32(28, y2);
+		floats.setF32(32, z2);
+		floats.setF32(36, radius);
+		floats.setF32(40, dx);
+		floats.setF32(44, dy);
+		floats.setF32(48, dz);
+		floats.setI32(52, category);
+		floats.setI32(56, mask);
+		return finishCast(Native.world_cast(w, floats, 2, results));
+	}
+
+	/**
+		Everything a sphere standing at a point overlaps. Returns how many;
+		`overlapped(i)` is the shape.
+
+		This is the blast radius question, the "is there room here"
+		question, and the "what is in this cupboard" question.
+	**/
+	public function overlapSphere(radius:Float, x:Float, y:Float, z:Float, category = 1,
+			mask = -1):Int {
+		floats.setF32(0, x);
+		floats.setF32(4, y);
+		floats.setF32(8, z);
+		floats.setF32(12, 0);
+		floats.setF32(16, 0);
+		floats.setF32(20, 0);
+		floats.setF32(24, radius);
+		floats.setI32(28, category);
+		floats.setI32(32, mask);
+		return Native.world_overlap(w, floats, 1, results, MAX_HITS);
+	}
+
+	/**
+		Everything whose bounds overlap a box, given by two corners.
+
+		Bounds, not shapes: this answers with everything whose box overlaps
+		the box, which is more than actually overlaps. It is the cheap
+		question, and the right one when the answer is going to be checked
+		properly anyway.
+	**/
+	public function overlapBox(minX:Float, minY:Float, minZ:Float, maxX:Float, maxY:Float,
+			maxZ:Float, category = 1, mask = -1):Int {
+		floats.setF32(0, minX);
+		floats.setF32(4, minY);
+		floats.setF32(8, minZ);
+		floats.setF32(12, maxX);
+		floats.setF32(16, maxY);
+		floats.setF32(20, maxZ);
+		floats.setI32(24, category);
+		floats.setI32(28, mask);
+		return Native.world_overlap_box(w, floats, results, MAX_HITS);
+	}
+
+	/** One of the shapes an overlap found. **/
+	public function overlapped(i:Int):Shape {
+		return shapeOf(results.getI32(i * 4));
+	}
+
+	/** The Body behind one of the shim's numbers, or null. **/
+	public function bodyOf(id:Int):Body {
+		return id < 0 || id >= byBody.length ? null : byBody[id];
+	}
+
+	/** The Shape behind one of the shim's numbers, or null. **/
+	public function shapeOf(id:Int):Shape {
+		return id < 0 || id >= byShape.length ? null : byShape[id];
+	}
+
+	function writeRay(x:Float, y:Float, z:Float, dx:Float, dy:Float, dz:Float, category:Int,
+			mask:Int) {
+		floats.setF32(0, x);
+		floats.setF32(4, y);
+		floats.setF32(8, z);
+		floats.setF32(12, dx);
+		floats.setF32(16, dy);
+		floats.setF32(20, dz);
+		floats.setI32(24, category);
+		floats.setI32(28, mask);
+	}
+
+	function finishCast(hit:Bool):Bool {
+		if (!hit) {
+			hitShape = null;
+			hitBody = null;
+			return false;
+		}
+		readHit(0);
+		return true;
+	}
+
+	function readHit(i:Int) {
+		final at = i * 8 * 4;
+		hitShape = shapeOf(results.getI32(at));
+		hitBody = hitShape == null ? null : hitShape.body;
+		hitAt = results.getF32(at + 4);
+		hitX = results.getF32(at + 8);
+		hitY = results.getF32(at + 12);
+		hitZ = results.getF32(at + 16);
+		hitNx = results.getF32(at + 20);
+		hitNy = results.getF32(at + 24);
+		hitNz = results.getF32(at + 28);
 	}
 
 	public function dispose() {

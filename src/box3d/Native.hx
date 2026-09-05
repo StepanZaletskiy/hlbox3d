@@ -248,5 +248,55 @@ class Native {
 		return null;
 	}
 
+
+	// --- queries -----------------------------------------------------------
+
+	/**
+		Eight words in: the start, the ray as a vector, then the category
+		and mask as ints. Eight words out: the shape as an int, the
+		fraction, the point, the normal.
+	**/
+	public static function world_ray(w:WorldPtr, v:hl.Bytes, out:hl.Bytes):Bool {
+		return false;
+	}
+
+	/** The same, but every hit, eight words each. Returns how many fitted. **/
+	public static function world_ray_all(w:WorldPtr, v:hl.Bytes, out:hl.Bytes, max:Int):Int {
+		return 0;
+	}
+
+	/**
+		The origin, then `count` points and a radius, then the two filter
+		words. Shapes come back as one int each.
+	**/
+	public static function world_overlap(w:WorldPtr, v:hl.Bytes, count:Int, out:hl.Bytes,
+			max:Int):Int {
+		return 0;
+	}
+
+	/** Six f32 of bounds then the two filter words. **/
+	public static function world_overlap_box(w:WorldPtr, v:hl.Bytes, out:hl.Bytes, max:Int):Int {
+		return 0;
+	}
+
+	/**
+		The origin, `count` points and a radius, the sweep, then the filter.
+		Out as for a ray.
+	**/
+	public static function world_cast(w:WorldPtr, v:hl.Bytes, count:Int, out:hl.Bytes):Bool {
+		return false;
+	}
+
+	/** Fifteen words: origin, the capsule's ends, its radius, the move, the filter. **/
+	public static function world_cast_mover(w:WorldPtr, v:hl.Bytes):Float {
+		return 1.0;
+	}
+
+	/** Eight words a plane: the normal, the offset, the point, the shape. **/
+	public static function world_collide_mover(w:WorldPtr, v:hl.Bytes, out:hl.Bytes,
+			max:Int):Int {
+		return 0;
+	}
+
 	public static function mesh_destroy(mesh:MeshPtr):Void {}
 }

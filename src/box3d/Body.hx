@@ -167,6 +167,7 @@ class Body {
 	inline function keep(shapeId:Int):Shape {
 		final s = new Shape(this, shapeId);
 		shapes.push(s);
+		world.byShape[shapeId] = s;
 		return s;
 	}
 

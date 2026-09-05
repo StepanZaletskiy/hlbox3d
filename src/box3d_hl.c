@@ -137,6 +137,26 @@ static b3ShapeId shape_of(hb_world *w, int id) {
 static bool body_ok(b3BodyId b) { return b.index1 != 0; }
 static bool shape_ok(b3ShapeId s) { return s.index1 != 0; }
 
+/*
+	Our number for one of theirs, kept in the handle's own user data when
+	it is made. The alternative is a walk of the table on every ray hit,
+	and user data is what user data is for - nothing else here wants it.
+
+	Stored one higher than it is, so that zero means "never set" rather
+	than "body number zero".
+*/
+static int our_body(b3BodyId b) {
+	if( !body_ok(b) ) return NO_SLOT;
+	intptr_t v = (intptr_t)b3Body_GetUserData(b);
+	return v == 0 ? NO_SLOT : (int)(v - 1);
+}
+
+static int our_shape(b3ShapeId s) {
+	if( !shape_ok(s) ) return NO_SLOT;
+	intptr_t v = (intptr_t)b3Shape_GetUserData(s);
+	return v == 0 ? NO_SLOT : (int)(v - 1);
+}
+
 /* Reading arguments out of an f32 buffer, which is how anything wide arrives. */
 static float ff(vbyte *v, int i) { return ((float*)v)[i]; }
 
@@ -325,7 +345,9 @@ HL_PRIM int HL_NAME(world_add_body)(hb_world *w, vbyte *v, int motion) {
 	def.rotation = (b3Quat){ { ff(v, 3), ff(v, 4), ff(v, 5) }, ff(v, 6) };
 	b3BodyId body = b3CreateBody(w->id, &def);
 	if( !body_ok(body) ) return NO_SLOT;
-	return hb_keep(&w->bodies, pack_body(body));
+	int id = hb_keep(&w->bodies, pack_body(body));
+	b3Body_SetUserData(body, (void*)(intptr_t)(id + 1));
+	return id;
 }
 
 /*
@@ -679,7 +701,9 @@ static b3ShapeDef shape_def(vbyte *v, int i) {
 
 static int shape_keep(hb_world *w, b3ShapeId s) {
 	if( !shape_ok(s) ) return NO_SLOT;
-	return hb_keep(&w->shapes, pack_shape(s));
+	int id = hb_keep(&w->shapes, pack_shape(s));
+	b3Shape_SetUserData(s, (void*)(intptr_t)(id + 1));
+	return id;
 }
 
 /* Eight f32: the radius, the centre it sits at, then the four settings. */
@@ -765,10 +789,7 @@ HL_PRIM void HL_NAME(shape_remove)(hb_world *w, int id, bool update_mass) {
 HL_PRIM int HL_NAME(shape_body)(hb_world *w, int id) {
 	b3ShapeId s = shape_of(w, id);
 	if( !shape_ok(s) ) return NO_SLOT;
-	b3BodyId b = b3Shape_GetBody(s);
-	for( int i = 0; i < w->bodies.n; i++ )
-		if( w->bodies.slots[i] == pack_body(b) ) return i;
-	return NO_SLOT;
+	return our_body(b3Shape_GetBody(s));
 }
 
 /*
@@ -974,3 +995,253 @@ DEFINE_PRIM(_MESH, mesh_hollow_box, _BYTES);
 DEFINE_PRIM(_MESH, mesh_wave, _BYTES);
 DEFINE_PRIM(_MESH, mesh_torus, _I32 _I32 _F64 _F64);
 DEFINE_PRIM(_VOID, mesh_destroy, _MESH);
+
+/* ---- queries -------------------------------------------------------- */
+
+/*
+	Asking the world what is where, without moving anything.
+
+	Box3D reports hits through callbacks, which the first rule at the top
+	of this file forbids passing on to Haxe. So every one of these
+	collects in C and hands back a buffer: the caller says how much room
+	it has, and gets told how many hits fitted.
+
+	Turning one of Box3D's handles back into one of our numbers would be
+	a walk of the table, once per hit. Instead the number is kept in the
+	handle's own user data when the body or shape is made - that is what
+	user data is for, and nothing else here wants it.
+
+	A filter is two bit sets: what the ray counts as, and what it may
+	hit. A shape answers only if each is in the other's mask, so a ray
+	that ignores the player is a matter of leaving the player's bit out
+	of the mask rather than of checking afterwards.
+*/
+
+static int32_t ii(vbyte *v, int i) { return ((int32_t*)v)[i]; }
+static void put_i(vbyte *out, int i, int32_t x) { ((int32_t*)out)[i] = x; }
+
+static b3QueryFilter query_filter(vbyte *v, int i) {
+	b3QueryFilter f = b3DefaultQueryFilter();
+	/*
+		Both are taken as they come. An earlier version left a zero alone
+		as "no preference", which made a mask of nothing mean a mask of
+		everything - the opposite of what it says. Minus one is the way to
+		ask for everything, and zero asks for nothing and gets it.
+	*/
+	f.categoryBits = (uint64_t)(uint32_t)ii(v, i);
+	f.maskBits = (uint64_t)(uint32_t)ii(v, i + 1);
+	return f;
+}
+
+/*
+	The nearest thing along a ray.
+
+	Eight words in: the start, then the whole of the ray as a vector -
+	its direction and its length together, because a ray of unit length
+	pointing somewhere is not a question anybody asks - then the two
+	filter words as ints.
+
+	Eight words out: the shape as an int, then the fraction along the ray,
+	the point, and the normal of the surface there. False if it hit
+	nothing, and the buffer is left alone.
+*/
+HL_PRIM bool HL_NAME(world_ray)(hb_world *w, vbyte *v, vbyte *out) {
+	b3RayResult r = b3World_CastRayClosest(w->id, (b3Pos){ ff(v, 0), ff(v, 1), ff(v, 2) },
+		v3(v, 3), query_filter(v, 6));
+	if( !r.hit ) return false;
+	put_i(out, 0, our_shape(r.shapeId));
+	put(out, 1, r.fraction);
+	put3(out, 2, (b3Vec3){ r.point.x, r.point.y, r.point.z });
+	put3(out, 5, r.normal);
+	return true;
+}
+
+/*
+	Everything along a ray, nearest first is not promised: they arrive in
+	whatever order the tree is walked, and sorting them is the caller's
+	business if it matters.
+
+	Eight words a hit, laid out as above. The return is how many were
+	written, which is never more than `max`.
+*/
+typedef struct {
+	vbyte *out;
+	int max, n;
+} ray_all_ctx;
+
+static float ray_all_hit(b3ShapeId shape, b3Pos point, b3Vec3 normal, float fraction,
+		uint64_t material, int triangle, int child, void *context) {
+	ray_all_ctx *c = (ray_all_ctx*)context;
+	(void)material; (void)triangle; (void)child;
+	if( c->n < c->max ) {
+		vbyte *o = c->out + c->n * 8 * 4;
+		put_i(o, 0, our_shape(shape));
+		put(o, 1, fraction);
+		put3(o, 2, (b3Vec3){ point.x, point.y, point.z });
+		put3(o, 5, normal);
+		c->n++;
+	}
+	/* One keeps the ray its full length, which is what "everything" means. */
+	return 1.0f;
+}
+
+HL_PRIM int HL_NAME(world_ray_all)(hb_world *w, vbyte *v, vbyte *out, int max) {
+	ray_all_ctx c = { out, max, 0 };
+	b3World_CastRay(w->id, (b3Pos){ ff(v, 0), ff(v, 1), ff(v, 2) }, v3(v, 3),
+		query_filter(v, 6), ray_all_hit, &c);
+	return c.n;
+}
+
+/*
+	A proxy is the shape a query is asked in: a few points and a radius
+	around them. One point is a sphere, two a capsule, eight a box, and
+	anything else is the convex hull of what it was given.
+
+	Built here out of a buffer rather than taken as a shape, because the
+	thing being asked about usually does not exist in the world: where
+	would this crate fit, can this character stand here.
+*/
+static b3ShapeProxy make_proxy(vbyte *v, int i, int count) {
+	static b3Vec3 points[8];
+	b3ShapeProxy p;
+	int n = count > 8 ? 8 : count;
+	for( int k = 0; k < n; k++ ) points[k] = v3(v, i + k * 3);
+	p.points = points;
+	p.count = n;
+	p.radius = ff(v, i + n * 3);
+	return p;
+}
+
+/*
+	Everything overlapping a shape standing at a point.
+
+	The buffer in holds the query: the origin, then `count` points and a
+	radius, then the two filter words. Shapes come back as one int each.
+*/
+typedef struct {
+	vbyte *out;
+	int max, n;
+} overlap_ctx;
+
+static bool overlap_hit(b3ShapeId shape, void *context) {
+	overlap_ctx *c = (overlap_ctx*)context;
+	if( c->n < c->max ) put_i(c->out, c->n++, our_shape(shape));
+	return c->n < c->max;
+}
+
+HL_PRIM int HL_NAME(world_overlap)(hb_world *w, vbyte *v, int count, vbyte *out, int max) {
+	overlap_ctx c = { out, max, 0 };
+	b3ShapeProxy proxy = make_proxy(v, 3, count);
+	b3World_OverlapShape(w->id, (b3Pos){ ff(v, 0), ff(v, 1), ff(v, 2) }, &proxy,
+		query_filter(v, 4 + count * 3), overlap_hit, &c);
+	return c.n;
+}
+
+/* Everything whose bounds overlap a box. Six f32 then the two filter words. */
+HL_PRIM int HL_NAME(world_overlap_box)(hb_world *w, vbyte *v, vbyte *out, int max) {
+	overlap_ctx c = { out, max, 0 };
+	b3AABB box;
+	box.lowerBound = (b3Pos){ ff(v, 0), ff(v, 1), ff(v, 2) };
+	box.upperBound = (b3Pos){ ff(v, 3), ff(v, 4), ff(v, 5) };
+	b3World_OverlapAABB(w->id, box, query_filter(v, 6), overlap_hit, &c);
+	return c.n;
+}
+
+/*
+	A shape swept along a path: what it would hit first, and how far along
+	it got. This is how a crate is put down without it landing inside a
+	wall, and how a thrown thing is checked before it is thrown.
+
+	In: the origin, `count` points and a radius, the sweep as a vector,
+	then the two filter words. Out: as for a ray.
+*/
+typedef struct {
+	vbyte *out;
+	bool hit;
+	float nearest;
+} cast_ctx;
+
+static float cast_hit(b3ShapeId shape, b3Pos point, b3Vec3 normal, float fraction,
+		uint64_t material, int triangle, int child, void *context) {
+	cast_ctx *c = (cast_ctx*)context;
+	(void)material; (void)triangle; (void)child;
+	if( c->hit && fraction >= c->nearest ) return c->nearest;
+	c->hit = true;
+	c->nearest = fraction;
+	put_i(c->out, 0, our_shape(shape));
+	put(c->out, 1, fraction);
+	put3(c->out, 2, (b3Vec3){ point.x, point.y, point.z });
+	put3(c->out, 5, normal);
+	/*
+		Returning the fraction just found shortens the sweep, so that the
+		rest of the walk only looks at what is nearer than this.
+	*/
+	return fraction;
+}
+
+HL_PRIM bool HL_NAME(world_cast)(hb_world *w, vbyte *v, int count, vbyte *out) {
+	cast_ctx c = { out, false, 1.0f };
+	b3ShapeProxy proxy = make_proxy(v, 3, count);
+	int after = 4 + count * 3;
+	b3World_CastShape(w->id, (b3Pos){ ff(v, 0), ff(v, 1), ff(v, 2) }, &proxy, v3(v, after),
+		query_filter(v, after + 3), cast_hit, &c);
+	return c.hit;
+}
+
+/*
+	How far a capsule may be moved before it meets something. This is the
+	one Box3D built for characters, and it is a sweep that knows it is
+	sweeping a body that walks: it comes back as a fraction of the move
+	rather than as a hit to be interpreted.
+
+	Eleven f32: the origin, the capsule's two ends, its radius, the move,
+	then the two filter words.
+*/
+HL_PRIM double HL_NAME(world_cast_mover)(hb_world *w, vbyte *v) {
+	b3Capsule mover = { v3(v, 3), v3(v, 6), ff(v, 9) };
+	/* No mover filter: the two bit sets are all the choosing this needs. */
+	return b3World_CastMover(w->id, (b3Pos){ ff(v, 0), ff(v, 1), ff(v, 2) }, &mover,
+		v3(v, 10), query_filter(v, 13), NULL, NULL);
+}
+
+/*
+	The planes a capsule is resting against where it stands: what a
+	character controller pushes out of, one plane per surface within
+	reach.
+
+	Out: seven f32 a plane - the normal, how far along it the capsule is,
+	and the point - and the shape it came from as an int in the eighth.
+*/
+typedef struct {
+	vbyte *out;
+	int max, n;
+} mover_ctx;
+
+static bool mover_hit(b3ShapeId shape, const b3PlaneResult *planes, int count, void *context) {
+	mover_ctx *c = (mover_ctx*)context;
+	for( int i = 0; i < count && c->n < c->max; i++ ) {
+		vbyte *o = c->out + c->n * 8 * 4;
+		put3(o, 0, planes[i].plane.normal);
+		put(o, 3, planes[i].plane.offset);
+		put3(o, 4, planes[i].point);
+		put_i(o, 7, our_shape(shape));
+		c->n++;
+	}
+	return c->n < c->max;
+}
+
+HL_PRIM int HL_NAME(world_collide_mover)(hb_world *w, vbyte *v, vbyte *out, int max) {
+	mover_ctx c = { out, max, 0 };
+	b3Capsule mover = { v3(v, 3), v3(v, 6), ff(v, 9) };
+	b3World_CollideMover(w->id, (b3Pos){ ff(v, 0), ff(v, 1), ff(v, 2) }, &mover,
+		query_filter(v, 10), mover_hit, &c);
+	return c.n;
+}
+
+DEFINE_PRIM(_BOOL, world_ray, _WORLD _BYTES _BYTES);
+DEFINE_PRIM(_I32, world_ray_all, _WORLD _BYTES _BYTES _I32);
+DEFINE_PRIM(_I32, world_overlap, _WORLD _BYTES _I32 _BYTES _I32);
+DEFINE_PRIM(_I32, world_overlap_box, _WORLD _BYTES _BYTES _I32);
+DEFINE_PRIM(_BOOL, world_cast, _WORLD _BYTES _I32 _BYTES);
+DEFINE_PRIM(_F64, world_cast_mover, _WORLD _BYTES);
+DEFINE_PRIM(_I32, world_collide_mover, _WORLD _BYTES _BYTES _I32);

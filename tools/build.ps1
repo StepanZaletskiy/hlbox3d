@@ -12,14 +12,21 @@
 	the build directory the first time and reused after that.
 
 		tools/build.ps1              build the module
+		tools/build.ps1 -Check       build it and run the self-test
 		tools/build.ps1 -Bench       build it and run the pyramid
 		tools/build.ps1 -Bench -Layers 36 -Substeps 4
 
-	The bench needs a Haxe compiler on PATH, and the module does not.
+	The self-test is the one to run after every change to the shim: it
+	states what each primitive should do and says so when it does not,
+	and its exit code is the number of failures.
+
+	The bench and the self-test need a Haxe compiler on PATH. The module
+	does not.
 #>
 [CmdletBinding()]
 param(
 	[switch]$Bench,
+	[switch]$Check,
 	[int]$Layers = 15,
 	[int]$Substeps = 0,
 	# The release the Windows CI job takes, and what the game runs next to.
@@ -84,16 +91,39 @@ if ($LASTEXITCODE -ne 0) { throw "configure failed" }
 if ($LASTEXITCODE -ne 0) { throw "build failed" }
 Write-Host "built $build\box3d.hdll"
 
-if (-not $Bench) { return }
+if (-not $Bench -and -not $Check) { return }
 
 # HashLink looks for native modules next to the bytecode, and libhl.dll
 # next to hl.exe is not enough when hl.exe is run from elsewhere.
 Copy-Item (Join-Path (Split-Path $hl.Exe -Parent) "libhl.dll") $build -Force
-Push-Location $build
-try {
-	haxe (Join-Path $root "test\bench.hxml")
-	if ($LASTEXITCODE -ne 0) { throw "haxe failed" }
-	$args = @("bench.hl", "$Layers")
-	if ($Substeps -gt 0) { $args += "$Substeps" }
-	& $hl.Exe @args
-} finally { Pop-Location }
+# The hxml files say -cp src and -cp test, which are relative to the
+# repository, so haxe is run from there. hl is run from the build
+# directory instead, because that is where the module is and HashLink
+# looks for one next to the bytecode.
+function Build-Hxml($name) {
+	Push-Location $root
+	try {
+		haxe "test\$name.hxml"
+		if ($LASTEXITCODE -ne 0) { throw "haxe failed on $name.hxml" }
+	} finally { Pop-Location }
+}
+
+if ($Check) {
+	Build-Hxml "check"
+	Push-Location $build
+	try {
+		& $hl.Exe "check.hl"
+		if ($LASTEXITCODE -ne 0) { throw "$LASTEXITCODE checks failed" }
+	} finally { Pop-Location }
+}
+
+if ($Bench) {
+	Build-Hxml "bench"
+	Push-Location $build
+	try {
+		# Not $args: that name is PowerShell's own and cannot be assigned.
+		$run = @("bench.hl", "$Layers")
+		if ($Substeps -gt 0) { $run += "$Substeps" }
+		& $hl.Exe @run
+	} finally { Pop-Location }
+}

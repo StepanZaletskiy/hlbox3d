@@ -1,0 +1,7 @@
+-cp src
+-cp test
+# The physics compiles without Heaps when this is set, which is what a
+# console check wants. Everything else gets the scene layer.
+-D box3d_no_heaps
+-main Check
+-hl build/check.hl
