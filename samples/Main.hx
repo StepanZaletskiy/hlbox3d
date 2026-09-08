@@ -1,218 +1,62 @@
-import box3d.World;
-import box3d.Body;
-
-/**
-	The samples, in one window.
-
-	Every scene here is a few lines that show one thing the binding does,
-	drawn out of the physics shapes themselves rather than out of models -
-	see box3d.Draw for why. Left and right arrows change scene, space
-	restarts it, and the name of the current one is in the corner.
-
-	The forward renderer and a light are set up once, in `init`, and are
-	the only things here that are about Heaps rather than about physics.
-**/
+// A floor and a hundred things falling on it: the least that shows the
+// physics is on. The same file builds to HashLink (sample.hxml) and to
+// JavaScript (sample_js.hxml); only the start differs, since on the web
+// the wasm module loads before the first world can exist.
 class Main extends hxd.App {
 
-	static inline var STEP = 1 / 60.0;
-
-	var world:World;
-	var scenes:Array<Scene>;
-	var current = 0;
-	var label:h2d.Text;
-	var time = 0.0;
-
-	/**
-		Everything a scene builds goes under here, so that changing scene is
-		emptying one object rather than emptying the world and putting the
-		lights back afterwards.
-	**/
+	var world:box3d.World;
+	// Everything the world draws sits under this, so a restart is one `remove`.
 	var stage:h3d.scene.Object;
 
 	override function init() {
-		/*
-			Heaps is z-up, as the physics is, so nothing has to be turned:
-			a body's position and rotation go straight onto its object.
-		*/
-		engine.backgroundColor = 0xFF1A1E24;
-		s3d.camera.pos.set(11, -11, 7);
-		s3d.camera.target.set(0, 0, 1.0);
-		/*
-			A depth range the scene actually occupies. Heaps starts a camera
-			two centimetres from its near plane and four kilometres from its
-			far one, which spends nearly all of the depth buffer on the
-			first metre and leaves faces a few metres out fighting over the
-			rest.
-		*/
-		s3d.camera.zNear = 0.5;
-		s3d.camera.zFar = 200;
+		// The forward renderer draws nothing lit without a light system, and says nothing.
+		s3d.lightSystem = new h3d.scene.fwd.LightSystem();
+		new h3d.scene.fwd.DirLight(new h3d.Vector(1, 2, -4), s3d);
+		new h3d.scene.CameraController.OrbitCameraController(80, s3d);
+		build();
+	}
 
-		/*
-			The forward renderer, chosen rather than inherited. Heaps starts
-			a scene on its physically-based one, which needs an environment
-			map and a set of render properties before it will put a light in
-			the frame at all - and without them draws everything black and
-			says nothing. That is a reasonable default for a game with an
-			artist on it and the wrong one for a page of samples, which
-			should need nothing but the library.
-		*/
-		final lights = new h3d.scene.fwd.LightSystem();
-		lights.ambientLight.set(0.30, 0.31, 0.36);
-		s3d.lightSystem = lights;
-		final renderer = new h3d.scene.fwd.Renderer();
-		/*
-			Shadows the grey of a cloudy day rather than the black of a
-			cave: the colour is what a shaded pixel is multiplied by, and
-			Heaps starts it at zero, which puts a hole in the floor under
-			everything.
-		*/
-		renderer.shadow.color.set(0.55, 0.57, 0.63);
-		s3d.renderer = renderer;
-
-		final light = new h3d.scene.fwd.DirLight(new h3d.Vector(-0.4, 0.55, -1), s3d);
-		light.enableSpecular = true;
-		light.color.set(0.9, 0.88, 0.82);
-
+	// The scene from nothing: a world and its drawing. Space does it again.
+	function build() {
 		stage = new h3d.scene.Object(s3d);
+		world = new box3d.World();
+		world.setGravity(0, 0, -10.0);
 
-		label = new h2d.Text(hxd.res.DefaultFont.get(), s2d);
-		label.x = 12;
-		label.y = 10;
-		label.scale(2);
+		// The solver is Box3D's as it comes: sixty steps a second with four
+		// substeps, and bodies that fall asleep once they settle. The one
+		// thing set here is a little rolling resistance, or the spheres would
+		// roll on the flat floor for ever and never sleep.
+		world.rolling = 0.05;
 
-		scenes = Scenes.all();
-		if (shotScene >= 0) current = shotScene % scenes.length;
-		start();
+		final red = h3d.mat.Material.create();
+		red.color.setColor(0x800000);
+		world.addBox(50, 50, 0.5, 0, 0, -0.5, Static).attach(stage, red);
+
+		for (i in 0...100) {
+			final x = Math.random() * 10, y = Math.random() * 10, z = 10 + Math.random() * 10;
+			final body = Std.random(2) == 0 ? world.addSphere(0.5, x, y, z) : world.addBox(0.5, 0.5, 0.5, x, y, z);
+			body.attach(stage);
+		}
+	}
+
+	function restart() {
+		stage.remove();
+		world.dispose();
+		build();
 	}
 
 	override function update(dt:Float) {
-		if (hxd.Key.isPressed(hxd.Key.RIGHT)) {
-			current = (current + 1) % scenes.length;
-			start();
-		}
-		if (hxd.Key.isPressed(hxd.Key.LEFT)) {
-			current = (current + scenes.length - 1) % scenes.length;
-			start();
-		}
-		if (hxd.Key.isPressed(hxd.Key.SPACE)) start();
-
-		// A fixed step, whatever the frame rate: physics that varies with
-		// how fast the machine is gives a different simulation on every
-		// machine and a worse one on a slow machine.
-		time += dt;
-		while (time >= STEP) {
-			time -= STEP;
-			world.step(STEP);
-			final scene = scenes[current];
-			if (scene.tick != null) scene.tick(world, STEP);
-		}
-		world.sync();
-	}
-
-	function start() {
-		if (world != null) world.dispose();
-		stage.removeChildren();
-
-		world = new World();
-		world.setGravity(0, 0, -9.81);
-		world.substeps = 2;
-
-		final scene = scenes[current];
-		scene.build(world, stage);
-		world.optimize();
-
-		label.text = '${current + 1}/${scenes.length}  ${scene.name}\n${scene.about}';
-		time = 0;
-	}
-
-
-	/*
-		A picture of one scene, and then out.
-
-			hl samples.hl --shot 3 --out pyramid.png
-
-		Here because "it starts" and "it draws the right thing" are
-		different claims, and only one of them can be checked without eyes.
-		It is also how the pictures in the README are made, so they cannot
-		drift away from what the code does.
-	*/
-	static var shotScene = -1;
-	static var shotOut = "shot.png";
-
-	/**
-		Frames to run before the picture is taken. The first few are spent
-		waiting for the window to report its real size, and the rest
-		waiting for the scene to settle: forty frames in, everything is
-		still in the air where it was dropped, which makes for a picture of
-		nothing happening yet.
-	**/
-	static inline var WARM = 260;
-
-	static inline var SHOT_W = 1280;
-	static inline var SHOT_H = 720;
-
-	var frame = 0;
-	var target:h3d.mat.Texture;
-
-	override function render(e:h3d.Engine) {
-		if (shotScene < 0) {
-			super.render(e);
-			return;
-		}
-		/*
-			The camera takes its aspect from the engine, not from whatever
-			is being drawn into, so a target of one shape and an engine of
-			another gives a picture squashed by the difference between
-			them. Asked every frame because the window does not report its
-			real size at once: SDL's event arrives a frame or two after the
-			window opens and puts the engine back to the window's size.
-		*/
-		if (e.width != SHOT_W || e.height != SHOT_H) e.resize(SHOT_W, SHOT_H);
-
-		if (target == null) {
-			target = new h3d.mat.Texture(SHOT_W, SHOT_H, [Target]);
-			/*
-				A target of its own has no depth buffer unless given one, and
-				without one nothing is tested against anything: whatever is
-				drawn last is what is seen. A convex shape on its own still
-				looks right, because culling hides its far faces, so the
-				mistake only shows once there is a floor - which is then drawn
-				over everything standing on it.
-			*/
-			target.depthBuffer = new h3d.mat.Texture(SHOT_W, SHOT_H, Depth24Stencil8);
-		}
-		e.pushTarget(target);
-		// A target is not cleared to the engine background: that only
-		// happens for the window. Without this the picture is whatever the
-		// texture happened to contain, which is white.
-		e.clear(0xFF1A1E24, 1, 0);
-		s3d.render(e);
-		e.popTarget();
-		if (++frame < WARM) return;
-		sys.io.File.saveBytes(shotOut, target.capturePixels().toPNG());
-		Sys.println('${scenes[current].name} -> $shotOut');
-		Sys.exit(0);
+		if (hxd.Key.isPressed(hxd.Key.SPACE)) restart();
+		world.update(dt);
+		// The title counts the bodies still awake: the pile goes quiet as it settles.
+		hxd.Window.getInstance().title = "hlbox3d - " + world.activeCount + " awake";
 	}
 
 	static function main() {
-		final args = Sys.args();
-		var i = 0;
-		while (i < args.length) {
-			switch (args[i]) {
-				case "--shot": shotScene = Std.parseInt(args[++i]);
-				case "--out": shotOut = args[++i];
-				default:
-			}
-			i++;
-		}
+		#if js
+		box3d.Wasm.load().then(_ -> new Main());
+		#else
 		new Main();
+		#end
 	}
-}
-
-/** One sample: a name, a sentence, how to build it, and what to do each step. **/
-typedef Scene = {
-	var name:String;
-	var about:String;
-	var build:World -> h3d.scene.Object -> Void;
-	var ?tick:World -> Float -> Void;
 }

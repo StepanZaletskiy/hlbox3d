@@ -1,0 +1,5 @@
+-cp src
+-cp test
+-D box3d_no_heaps
+-main Main
+-hl build/check.hl

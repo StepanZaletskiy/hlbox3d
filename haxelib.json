@@ -1,0 +1,13 @@
+{
+	"name": "hlbox3d",
+	"url": "https://github.com/macaodev/hlbox3d",
+	"license": "MIT",
+	"tags": ["physics", "hashlink", "heaps", "box3d", "3d"],
+	"description": "Box3D rigid body physics for HashLink, Heaps and the web: bodies, shapes, joints, queries, events, meshes, height fields, a character mover and a ragdoll, with a fixed step and interpolated drawing.",
+	"version": "0.1.0",
+	"releasenote": "First release.",
+	"contributors": ["macaodev"],
+	"classPath": "src/",
+	"main": "Run",
+	"dependencies": {}
+}

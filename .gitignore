@@ -1,5 +1,4 @@
 *.hl
-*.png
-/build.*/
-/build/
-build/
+/build*/
+/.fetchcontent-cache/
+/modules/

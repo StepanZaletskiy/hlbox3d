@@ -1,15 +1,17 @@
-# Builds box3d.hdll on both systems the game ships to and runs the bench on
-# each, so a change to the shim is tried where it will be used, not only
-# where it is cheapest.
+# Builds box3d.hdll on both systems the game ships to and runs the checks
+# on each, so a change to the shim is tried where it will be used, not
+# only where it is cheapest.
 #
-#   linux    the Steam Deck side: libhl built from the pinned checkout,
+#   linux    the Steam Deck side: libhl built from the fetched sources,
 #            the way the game's own Linux workflow does it
 #   windows  the artist's side: hl.h and libhl.lib taken from the same
 #            release archive the game builds against, never built here
+#   web      the same shim as box3d.js and box3d.wasm by Emscripten, the
+#            checks compiled to JavaScript and run under node
 #
-# The bench is the point of this repository for now. It is Jolt's own
-# pyramid, and the binding next door runs the same file against the same
-# numbers, so the two can be put side by side.
+# The checks are Box3D's own unit tests run through the binding, on the
+# float module, on the large-world one and on the web one; they are what
+# fails the run.
 
 name: Build
 
@@ -22,44 +24,45 @@ jobs:
     runs-on: ubuntu-22.04
     timeout-minutes: 30
 
-    # Only so the run can leave its results on a branch of its own. See the
-    # last step for why that is worth a permission.
-    permissions:
-      contents: write
-
     steps:
       - uses: actions/checkout@v4
-        with:
-          submodules: recursive
 
       - name: Dependencies
         run: |
           set -eux
           sudo apt-get update -y
-          sudo apt-get install --no-install-recommends -y zlib1g-dev cmake ninja-build
+          sudo apt-get install --no-install-recommends -y build-essential cmake ninja-build
 
-      # Only libhl and the hl binary: no .hdll from the runtime is needed
-      # here, the bench draws nothing and opens no window.
-      - name: Build HashLink
+      # Before the configure: the check target is only made when haxe is
+      # found then.
+      - name: Get Haxe
         run: |
           set -eux
-          cd vendor/hashlink
-          make -j"$(nproc)" libhl.so
-          make -j"$(nproc)" hl
-          ls -la libhl.so hl
+          curl -fsSL -o haxe.tar.gz \
+            https://github.com/HaxeFoundation/haxe/releases/download/4.3.6/haxe-4.3.6-linux64.tar.gz
+          mkdir -p haxe && tar -xzf haxe.tar.gz -C haxe --strip-components=1
+          echo "$PWD/haxe" >> "$GITHUB_PATH"
+          echo "HAXE_STD_PATH=$PWD/haxe/std" >> "$GITHUB_ENV"
 
+      # Configuring fetches Box3D and the HashLink sources into build/_deps.
+      # Only libhl and the hl binary are built from the latter: no .hdll
+      # from the runtime is needed here, the checks draw nothing and open
+      # no window.
       - name: Build box3d.hdll
         run: |
           set -eux -o pipefail
           start=$(date +%s)
-          cmake -S . -B build -G Ninja \
-            -DCMAKE_BUILD_TYPE=Release \
-            -DHL_ROOT="$GITHUB_WORKSPACE/vendor/hashlink"
-          # The log goes to the results branch as well, so a compile error
-          # can be read without a token: the Actions API keeps logs behind one.
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
           cmake --build build -j"$(nproc)" 2>&1 | tee build/build.log
           echo "::notice title=Build time::$(( $(date +%s) - start ))s from cold"
           ls -la build/box3d.hdll
+
+      # What Box3D exports against what the shim calls. It costs a second
+      # and it catches the thing nobody notices - Box3D grows a function
+      # and the binding quietly does not have it.
+      - name: Coverage
+        shell: pwsh
+        run: ./.github/coverage.ps1
 
       # Exports are worth checking before running: a .hdll missing a symbol
       # does not fail to build, it fails to load, and the message names only
@@ -74,73 +77,49 @@ jobs:
             grep -q " $want\$" exports.txt || { echo "$want missing from box3d.hdll"; exit 1; }
           done
 
-      - name: Get Haxe
+      # The gate: Box3D's own tests through the public API, printed as its
+      # own runner prints them, and Box3D's own voice listened to from the
+      # first line, so a warning from it is a failure here. The same
+      # command as on a machine.
+      - name: Run the checks
         run: |
-          set -eux
-          curl -fsSL -o haxe.tar.gz \
-            https://github.com/HaxeFoundation/haxe/releases/download/4.3.6/haxe-4.3.6-linux64.tar.gz
-          mkdir -p haxe && tar -xzf haxe.tar.gz -C haxe --strip-components=1
-          echo "$PWD/haxe" >> "$GITHUB_PATH"
-          echo "HAXE_STD_PATH=$PWD/haxe/std" >> "$GITHUB_ENV"
+          set -eux -o pipefail
+          cmake --build build --target check 2>&1 | tail -5
 
-      - name: Compile the bench
-        run: haxe test/bench.hxml
-
-      # Both box3d.hdll and bench.hl already land in build/, and HashLink
-      # looks for native modules next to the bytecode.
-      #
-      # The output is echoed back as notices because a run's logs need admin
-      # rights to download, while annotations do not. GitHub keeps only the
-      # first ten notices of a step, so the bench says everything in fewer
-      # lines than that.
-      - name: Run the bench
+      # The other build of the module: positions as doubles, for worlds
+      # too big for a float. Built here rather than only on a release
+      # because it is the half nobody would notice had gone stale. It has
+      # the far halves the float build cannot hold, so the checks run more
+      # of them.
+      - name: Build the large-world module and check it
         run: |
-          set -eux
-          cd build
-          export LD_LIBRARY_PATH="$GITHUB_WORKSPACE/vendor/hashlink"
-          set +e
-          "$GITHUB_WORKSPACE/vendor/hashlink/hl" bench.hl > out.txt 2>&1
-          code=$?
-          set -e
-          while IFS= read -r line; do echo "::notice title=Bench::$line"; done < out.txt
-          exit $code
+          set -eux -o pipefail
+          cmake -S . -B build-large -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DHL_ROOT="$GITHUB_WORKSPACE/build/_deps/hashlink-src" \
+            -DFETCHCONTENT_SOURCE_DIR_BOX3D="$GITHUB_WORKSPACE/build/_deps/box3d-src" \
+            -DHLBOX3D_LARGE_WORLD=ON
+          cmake --build build-large -j"$(nproc)"
+          ls -la build-large/box3d.hdll
+          cmake --build build-large --target check 2>&1 | tail -5
 
-      # Annotations are readable without an account, but only ten of them
-      # survive per step, and the API that serves them refuses anyone
-      # unauthenticated after sixty requests an hour. A file on a branch has
-      # neither limit: raw.githubusercontent.com will simply hand it over.
-      #
-      # The branch holds one commit and is replaced every run - it is output,
-      # not history.
-      - name: Leave the results on the results branch
-        if: always()
-        env:
-          TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          set -eu
-          rm -rf pub && mkdir pub
-          cp build/out.txt pub/bench.txt 2>/dev/null || echo "no bench output" > pub/bench.txt
-          cp build/build.log pub/build.txt 2>/dev/null || echo "no build log" > pub/build.txt
-          echo "$GITHUB_SHA" > pub/commit.txt
-          cd pub
-          git init -q
-          git checkout -q -b results
-          git add -A
-          git -c user.name=ci -c user.email=ci@local commit -qm "results for $GITHUB_SHA"
-          git push -q --force \
-            "https://x-access-token:$TOKEN@github.com/$GITHUB_REPOSITORY.git" results
+      - uses: actions/upload-artifact@v4
+        with:
+          name: box3d.hdll-linux
+          path: |
+            build/box3d.hdll
+            build-large/box3d.hdll
+          retention-days: 14
 
   windows:
     runs-on: windows-latest
     timeout-minutes: 30
 
     steps:
-      # vendor/hashlink is not needed here at all: the headers and the
+      # The HashLink sources are not needed here at all: the headers and the
       # import library come out of the release archive below, exactly the
       # ones the game will be running next to.
       - uses: actions/checkout@v4
-      - name: Submodules
-        run: git submodule update --init --depth 1 vendor/box3d
 
       - name: Get the HashLink release
         shell: pwsh
@@ -181,29 +160,158 @@ jobs:
           [IO.File]::AppendAllText($env:GITHUB_PATH, "$($exe.DirectoryName)`n", (New-Object Text.UTF8Encoding $false))
           [IO.File]::AppendAllText($env:GITHUB_ENV, "HAXE_STD_PATH=$($exe.DirectoryName)\std`n", (New-Object Text.UTF8Encoding $false))
 
-      - name: Compile the bench
+      - name: Compile the checks
         shell: pwsh
         run: |
-          haxe test/bench.hxml
-          if ($LASTEXITCODE -ne 0) { throw "haxe failed" }
+          haxe test/Main.hxml
+          if ($LASTEXITCODE -ne 0) { throw "haxe failed on the checks" }
 
-      # The same bench, on the runtime the artist runs. libhl.dll and
-      # vcruntime140.dll come along from the archive: hl.exe needs them
-      # next to itself, and box3d.hdll next to the bytecode.
-      - name: Run the bench
+      # The gate, the same as on the other system.
+      - name: Run the checks
         shell: pwsh
         run: |
           Copy-Item "$env:HL_BIN\*.dll" build\
           Copy-Item "$env:HL_BIN\hl.exe" build\
           Push-Location build
-          $out = & .\hl.exe bench.hl 2>&1
+          $out = & .\hl.exe check.hl 2>&1
           $code = $LASTEXITCODE
           Pop-Location
-          foreach ($line in $out) { Write-Host "::notice title=Bench (Windows)::$line" }
-          if ($code -ne 0) { throw "the bench failed with $code" }
+          $out | Select-Object -Last 5 | ForEach-Object { Write-Host $_ }
+          if ($code -ne 0) { throw "$code checks failed" }
+
+      # The double-precision build, and the same checks against it.
+      - name: Build the large-world module and check it
+        shell: pwsh
+        run: |
+          cmake -S . -B build-large -A x64 -DHL_INCLUDE="$env:HL_INCLUDE" -DHL_LIB="$env:HL_LIB" -DFETCHCONTENT_SOURCE_DIR_BOX3D="$env:GITHUB_WORKSPACE\build\_deps\box3d-src" -DHLBOX3D_LARGE_WORLD=ON
+          if ($LASTEXITCODE -ne 0) { throw "configure failed" }
+          cmake --build build-large --config Release --parallel
+          if ($LASTEXITCODE -ne 0) { throw "build failed" }
+          if (-not (Test-Path build-large/box3d.hdll)) { throw "build-large/box3d.hdll is not there" }
+          Copy-Item build\check.hl build-large\
+          Copy-Item "$env:HL_BIN\*.dll" build-large\
+          Copy-Item "$env:HL_BIN\hl.exe" build-large\
+          Push-Location build-large
+          $out = & .\hl.exe check.hl 2>&1
+          $code = $LASTEXITCODE
+          Pop-Location
+          $out | Select-Object -Last 5 | ForEach-Object { Write-Host $_ }
+          if ($code -ne 0) { throw "$code checks failed on the large-world build" }
 
       - uses: actions/upload-artifact@v4
         with:
           name: box3d.hdll-windows
-          path: build/box3d.hdll
+          path: |
+            build/box3d.hdll
+            build-large/box3d.hdll
           retention-days: 14
+
+  # The same shim as a wasm module, and the same checks compiled to
+  # JavaScript and run under node, which the Emscripten SDK carries.
+  web:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Dependencies
+        run: |
+          set -eux
+          sudo apt-get update -y
+          sudo apt-get install --no-install-recommends -y cmake ninja-build
+
+      - name: Get Haxe
+        run: |
+          set -eux
+          curl -fsSL -o haxe.tar.gz \
+            https://github.com/HaxeFoundation/haxe/releases/download/4.3.6/haxe-4.3.6-linux64.tar.gz
+          mkdir -p haxe && tar -xzf haxe.tar.gz -C haxe --strip-components=1
+          echo "$PWD/haxe" >> "$GITHUB_PATH"
+          echo "HAXE_STD_PATH=$PWD/haxe/std" >> "$GITHUB_ENV"
+
+      - uses: mymindstorm/setup-emsdk@v14
+        with:
+          version: 6.0.9
+          actions-cache-folder: emsdk-cache
+
+      - name: Build box3d.js and box3d.wasm
+        run: |
+          set -eux -o pipefail
+          emcmake cmake -S . -B build-web -G Ninja -DCMAKE_BUILD_TYPE=Release
+          cmake --build build-web -j"$(nproc)"
+          ls -la build-web/box3d.js build-web/box3d.wasm
+
+      # The gate, the same as on the other systems: Box3D's own tests, this
+      # time through wasm. The determinism scenes must reach the same
+      # hashes as the native builds.
+      - name: Run the checks
+        run: |
+          set -eux -o pipefail
+          cmake --build build-web --target check 2>&1 | tail -5
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: box3d-web
+          path: |
+            build-web/box3d.js
+            build-web/box3d.wasm
+          retention-days: 14
+
+  # What `haxelib run hlbox3d install` downloads: the two builds of the
+  # module for both systems and the web module, as loose files on the
+  # release. Made only for a tag, and only if the checks above passed on
+  # every system - a release that was never checked is worse than none,
+  # because it is the one people trust.
+  #
+  #   git tag v0.1.0 && git push origin v0.1.0
+  release:
+    needs: [linux, windows, web]
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: box3d.hdll-linux
+          path: linux
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: box3d.hdll-windows
+          path: windows
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: box3d-web
+          path: web
+
+      # Six files with fixed names, which is what `haxelib run hlbox3d
+      # install` downloads for the version in haxelib.json: the module for
+      # each system in both builds, and the web module. The Haxe side comes
+      # from git, so there is no archive to assemble.
+      - name: Assets
+        run: |
+          set -eux
+          mkdir -p assets
+          cp linux/build/box3d.hdll assets/box3d-linux.hdll
+          cp linux/build-large/box3d.hdll assets/box3d-linux-large-world.hdll
+          cp windows/build/box3d.hdll assets/box3d-windows.hdll
+          cp windows/build-large/box3d.hdll assets/box3d-windows-large-world.hdll
+          cp web/box3d.js web/box3d.wasm assets/
+          ls -la assets
+
+      # The gh CLI rather than an action from someone else: it is on the
+      # runner already, and a release is not the place to trust a third
+      # party with a write token.
+      - name: Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -eux
+          gh release create "$GITHUB_REF_NAME" assets/* \
+            --title "$GITHUB_REF_NAME" \
+            --notes "Box3D for HashLink, Heaps and the web. Install with haxelib git hlbox3d https://github.com/macaodev/hlbox3d, then haxelib run hlbox3d install: it downloads the module here for your system. box3d-<system>.hdll has float positions, -large-world doubles; box3d.js and box3d.wasm are the same shim for the JavaScript target, haxelib run hlbox3d install --web <dir> fetches them."

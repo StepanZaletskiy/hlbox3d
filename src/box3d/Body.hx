@@ -1,470 +1,838 @@
 package box3d;
 
 /**
-	One thing in the world: where it is, how it moves, and what shape it
-	presents.
+	A rigid body: position, rotation, velocity and the shapes attached to it.
+	Bodies are created with `World.add`. The object holds the id Box3D knows the
+	body by and the last transform read back; `World.update` refreshes every body
+	after a step and `read` does one on demand. Nothing here allocates per frame.
 
-	Bodies come from `World.add`, and from the shorthands next to it that
-	make a body and its first shape together. The object is not the
-	physics - the shim holds that, and `id` is the number it knows this
-	one by - it is a place to keep the number, the last transform read
-	back, and the scene object being driven by it. One object per body is
-	nothing; one per frame would be the collector's whole evening, which
-	is why nothing here allocates.
-
-	`x, y, z` and the four of `q` are the last transform read, not a live
-	view. `World.update` refreshes every body it knows about; `read` does
-	one on demand.
-
-	A body with no shape has no mass and no collision. It is a point that
-	moves, which is occasionally what is wanted and usually a mistake.
+	```haxe
+	var crate = world.add(Dynamic, 0, 0, 2);
+	crate.box(0.5, 0.5, 0.5);
+	crate.object = model;
+	```
 **/
 class Body {
 
-	/** The number the shim knows it by. **/
-	public var id(default, null):Int;
+	/** The body id. **/
+	public var id(default, null) : Int;
 
-	public var world(default, null):World;
+	public var world(default, null) : World;
 
-	/** Static, kinematic or dynamic: what it was made as, or last set to. **/
-	@:allow(box3d) public var motion(default, null):Motion;
+	/** The body type: static, kinematic or dynamic. **/
+	@:allow(box3d) public var motion(default, null) : Motion;
 
-	/** Where it was when last read. **/
+	/** The position when last read. **/
 	public var x = 0.0;
 	public var y = 0.0;
 	public var z = 0.0;
 
-	/** How it was turned when last read, as a quaternion. **/
+	/** The rotation when last read, as a quaternion. **/
 	public var qx = 0.0;
 	public var qy = 0.0;
 	public var qz = 0.0;
 	public var qw = 1.0;
 
-	/** How it was moving when last read. `readVelocity` fills these. **/
+	/** The linear velocity when last read. `readVelocity` fills these. **/
 	public var vx = 0.0;
 	public var vy = 0.0;
 	public var vz = 0.0;
 
-	/** How it was turning when last read, radians a second about each axis. **/
+	/** The angular velocity when last read. Radians per second. **/
 	public var wx = 0.0;
 	public var wy = 0.0;
 	public var wz = 0.0;
 
-	/** The shapes on it, in the order they were added. **/
-	public var shapes(default, null):Array<Shape> = [];
+	/** The transform at the previous step, used to interpolate drawing between steps. `warp` discards it. **/
+	public var lastX(default, null) = 0.0;
+	public var lastY(default, null) = 0.0;
+	public var lastZ(default, null) = 0.0;
+	public var lastQx(default, null) = 0.0;
+	public var lastQy(default, null) = 0.0;
+	public var lastQz(default, null) = 0.0;
+	public var lastQw(default, null) = 1.0;
+
+	/** The shapes attached to the body, in the order they were added. **/
+	public var shapes(default, null) : Array<Shape> = [];
+
+	/** The closest point on the body found by `closestPoint`. **/
+	public var nearX = 0.0;
+	public var nearY = 0.0;
+	public var nearZ = 0.0;
 
 	#if !box3d_no_heaps
-	/**
-		A scene object this body drives. Set it, and `World.update` moves
-		it to match after every step: position and rotation, never scale,
-		so a model scaled to fit stays scaled.
+	/** A scene object driven by this body. `World.update` sets its position and rotation after every step, never its scale. **/
+	public var object : h3d.scene.Object;
 
-		Setting it is all that is needed - there is no register call and
-		nothing to remember to undo, because the body is already in the
-		world's list.
-	**/
-	public var object:h3d.scene.Object;
+	/** How many times `place` has moved the object. **/
+	public var placed(default, null) = 0;
+
+	/** Builds the scene object for `attach`, one mesh per shape. Replace it to draw bodies another way. **/
+	public static var attacher : (Body, h3d.scene.Object, h3d.mat.Material) -> h3d.scene.Object = Prims.body;
+
+	// Heaps keeps the quaternion it is handed, so each body owns one.
+	var quat = new h3d.Quat();
+
+	static var turn = new h3d.Matrix();
+	static var local = new h3d.Matrix();
 	#end
 
+	/** The frame this body was last added to `World.moved`. **/
+	@:allow(box3d) var frame = -1;
+
 	@:allow(box3d)
-	function new(world:World, id:Int) {
+	function new( world : World, id : Int ) {
 		this.world = world;
 		this.id = id;
 	}
 
-	// --- shapes ------------------------------------------------------------
+	// --- shapes ---
 
 	/**
-		A box, given as half extents: a crate 32 cm across is
-		`box(0.16, 0.16, 0.16)`.
-
-		`at` and `rotation` place it on the body rather than in the world,
-		which is only worth giving for the second and later shapes - the
-		legs of a chair, the barrel of a gun.
-
-		Box3D has no box of its own. This is a convex hull of eight points,
-		which is what a box is to a solver anyway.
+		Add a box given as half extents. `at` and `rotation` place it on the body.
+		This is a convex hull of eight points.
 	**/
-	public function box(hx:Float, hy:Float, hz:Float, ?at:{x:Float, y:Float, z:Float},
-			?rotation:{x:Float, y:Float, z:Float, w:Float}):Shape {
-		final b = world.floats;
-		b.setF32(0, hx);
-		b.setF32(4, hy);
-		b.setF32(8, hz);
-		b.setF32(12, at == null ? 0.0 : at.x);
-		b.setF32(16, at == null ? 0.0 : at.y);
-		b.setF32(20, at == null ? 0.0 : at.z);
-		b.setF32(24, rotation == null ? 0.0 : rotation.x);
-		b.setF32(28, rotation == null ? 0.0 : rotation.y);
-		b.setF32(32, rotation == null ? 0.0 : rotation.z);
-		b.setF32(36, rotation == null ? 1.0 : rotation.w);
+	public function box( hx : Float, hy : Float, hz : Float, ?at : { x : Float, y : Float, z : Float }, ?rotation : { x : Float, y : Float, z : Float, w : Float } ) : Shape {
+		var b = world.floats;
+		b.setF64(0, hx);
+		b.setF64(8, hy);
+		b.setF64(16, hz);
+		b.setF64(24, at == null ? 0.0 : at.x);
+		b.setF64(32, at == null ? 0.0 : at.y);
+		b.setF64(40, at == null ? 0.0 : at.z);
+		b.setF64(48, rotation == null ? 0.0 : rotation.x);
+		b.setF64(56, rotation == null ? 0.0 : rotation.y);
+		b.setF64(64, rotation == null ? 0.0 : rotation.z);
+		b.setF64(72, rotation == null ? 1.0 : rotation.w);
 		world.settings(b, 10);
 		return keep(Native.shape_box(world.w, id, b));
 	}
 
-	/** A sphere, at the body's origin unless `at` says otherwise. **/
-	public function sphere(radius:Float, ?at:{x:Float, y:Float, z:Float}):Shape {
-		final b = world.floats;
-		b.setF32(0, radius);
-		b.setF32(4, at == null ? 0.0 : at.x);
-		b.setF32(8, at == null ? 0.0 : at.y);
-		b.setF32(12, at == null ? 0.0 : at.z);
+	/** Add a sphere, at the body origin unless `at` is given. **/
+	public function sphere( radius : Float, ?at : { x : Float, y : Float, z : Float } ) : Shape {
+		var b = world.floats;
+		b.setF64(0, radius);
+		b.setF64(8, at == null ? 0.0 : at.x);
+		b.setF64(16, at == null ? 0.0 : at.y);
+		b.setF64(24, at == null ? 0.0 : at.z);
 		world.settings(b, 4);
 		return keep(Native.shape_sphere(world.w, id, b));
 	}
 
-	/**
-		A capsule between two points on the body, with a radius.
-
-		Box3D says a capsule by its two ends rather than by an axis and a
-		height, so a limb lying along its bone needs no rotation to stand
-		it up - which is half the fiddling gone from a ragdoll.
-
-		`capsule(0, 0, -0.4, 0, 0, 0.4, 0.3)` is a person a metre and a
-		half tall standing on their feet.
-	**/
-	public function capsule(x1:Float, y1:Float, z1:Float, x2:Float, y2:Float, z2:Float,
-			radius:Float):Shape {
-		final b = world.floats;
-		b.setF32(0, x1);
-		b.setF32(4, y1);
-		b.setF32(8, z1);
-		b.setF32(12, x2);
-		b.setF32(16, y2);
-		b.setF32(20, z2);
-		b.setF32(24, radius);
+	/** Add a capsule between two points on the body, with a radius. **/
+	public function capsule( x1 : Float, y1 : Float, z1 : Float, x2 : Float, y2 : Float, z2 : Float, radius : Float ) : Shape {
+		var b = world.floats;
+		b.setF64(0, x1);
+		b.setF64(8, y1);
+		b.setF64(16, z1);
+		b.setF64(24, x2);
+		b.setF64(32, y2);
+		b.setF64(40, z2);
+		b.setF64(48, radius);
 		world.settings(b, 7);
 		return keep(Native.shape_capsule(world.w, id, b));
 	}
 
-	/**
-		A convex hull built earlier from a cloud of points.
-
-		The hull is not copied: the shape points at it, so whatever made it
-		has to keep it alive for as long as the shape stands. Dropping the
-		last reference to a hull that is still in use leaks it rather than
-		crashing, which is the better of the two but still worth avoiding.
-	**/
-	public function hull(h:Hull):Shape {
-		final b = world.floats;
+	/** Add a convex hull. The hull is not copied and must outlive the shape. **/
+	public function hull( h : Hull ) : Shape {
+		var b = world.floats;
 		world.settings(b, 0);
-		return keep(Native.shape_hull(world.w, id, h.ptr, b));
-	}
-
-	/**
-		A triangle mesh: level geometry, and nothing else. It is hollow and
-		one-sided, so a dynamic body made of one falls through the world
-		the moment anything reaches its inside.
-
-		The same caution about lifetime applies as for hulls.
-	**/
-	public function mesh(m:Mesh, scaleX = 1.0, scaleY = 1.0, scaleZ = 1.0):Shape {
-		final b = world.floats;
-		b.setF32(0, scaleX);
-		b.setF32(4, scaleY);
-		b.setF32(8, scaleZ);
-		world.settings(b, 3);
-		return keep(Native.shape_mesh(world.w, id, m.ptr, b));
-	}
-
-	inline function keep(shapeId:Int):Shape {
-		final s = new Shape(this, shapeId);
-		shapes.push(s);
-		world.byShape[shapeId] = s;
+		var s = keep(Native.shape_hull(world.w, id, h.ptr, b));
+		@:privateAccess s.hull = h;
 		return s;
 	}
 
-	#if !box3d_no_heaps
+	/** Add a convex hull with a transform and a scale applied. Box3D keeps its own copy of the result. **/
+	public function hullTransformed( h : Hull, x = 0.0, y = 0.0, z = 0.0, qx = 0.0, qy = 0.0, qz = 0.0, qw = 1.0, sx = 1.0, sy = 1.0, sz = 1.0 ) : Shape {
+		var b = world.floats;
+		b.setF64(0, x);
+		b.setF64(8, y);
+		b.setF64(16, z);
+		b.setF64(24, qx);
+		b.setF64(32, qy);
+		b.setF64(40, qz);
+		b.setF64(48, qw);
+		b.setF64(56, sx);
+		b.setF64(64, sy);
+		b.setF64(72, sz);
+		world.settings(b, 10);
+		return keep(Native.shape_hull_transformed(world.w, id, h.ptr, b));
+	}
+
 	/**
-		Gives the body something to draw itself with, built out of its own
-		shapes, and sets `object` to it.
-
-		For looking at a scene before it has any art in it. What appears is
-		the geometry the solver is using rather than a model that resembles
-		it, which is the whole point: a model that quietly disagrees with
-		the collision is a bug nobody can see.
-
-		Replace `object` with a real model whenever there is one; `World.sync`
-		does not care which it is driving.
+		Add a triangle mesh. Meshes are hollow and one-sided, for static geometry.
+		The mesh is not copied and must outlive the shape.
+		`materials` is indexed by the mesh's material indices, up to 64. An index past the end gets the shape material.
 	**/
-	public function attach(parent:h3d.scene.Object, ?material:h3d.mat.Material):h3d.scene.Object {
-		object = Draw.body(this, parent, material);
+	public function mesh( m : Mesh, scaleX = 1.0, scaleY = 1.0, scaleZ = 1.0, ?materials : Array<Material> ) : Shape {
+		var count = materials == null ? 0 : materials.length;
+		if( count > 64 ) throw "box3d: a mesh shape takes sixty-four materials at most";
+		var b = count > 10 ? new Buf((23 + count * 4) * 8) : world.floats;
+		b.setF64(0, scaleX);
+		b.setF64(8, scaleY);
+		b.setF64(16, scaleZ);
+		world.settings(b, 3);
+		b.setF64(22 * 8, count);
+		for( i in 0...count ) {
+			var at = (23 + i * 4) * 8;
+			b.setF64(at, materials[i].friction);
+			b.setF64(at + 8, materials[i].restitution ?? 0.0);
+			b.setF64(at + 16, materials[i].rolling ?? 0.0);
+			b.setI32(at + 24, materials[i].id ?? 0);
+		}
+		var s = keep(Native.shape_mesh(world.w, id, m.ptr, b));
+		@:privateAccess s.mesh = m;
+		@:privateAccess s.mirrored = scaleX * scaleY * scaleZ < 0;
+		return s;
+	}
+
+	/**
+		Add a height field, on a static body only. Box3D keeps height fields y-up;
+		`World.addHeightField` turns the body so the field lies flat.
+		`materials` is indexed by the field's material indices, up to 64.
+	**/
+	public function heightField( hf : HeightField, ?materials : Array<Material> ) : Shape {
+		var count = materials == null ? 0 : materials.length;
+		if( count > 64 ) throw "box3d: a height field shape takes sixty-four materials at most";
+		var b = count > 10 ? new Buf((20 + count * 4) * 8) : world.floats;
+		world.settings(b, 0);
+		b.setF64(19 * 8, count);
+		for( i in 0...count ) {
+			var at = (20 + i * 4) * 8;
+			b.setF64(at, materials[i].friction);
+			b.setF64(at + 8, materials[i].restitution ?? 0.0);
+			b.setF64(at + 16, materials[i].rolling ?? 0.0);
+			b.setI32(at + 24, materials[i].id ?? 0);
+		}
+		var s = keep(Native.shape_height_field(world.w, id, hf.ptr, b));
+		@:privateAccess s.heightField = hf;
+		return s;
+	}
+
+	/** Add a baked compound, on a static body only. The compound was copied at the bake and may be dropped. **/
+	public function compound( c : Compound ) : Shape {
+		if( c.ptr == null ) throw "box3d: build the compound before putting it on a body";
+		var b = world.floats;
+		world.settings(b, 0);
+		var s = keep(Native.shape_compound(world.w, id, c.ptr, b));
+		@:privateAccess s.compound = c;
+		return s;
+	}
+
+	// --- scene object ---
+
+	#if !box3d_no_heaps
+	/** Build a scene object from the body's shapes with `attacher`, set `object` to it and place it. **/
+	public function attach( parent : h3d.scene.Object, ?material : h3d.mat.Material ) : h3d.scene.Object {
+		object = attacher(this, parent, material);
 		place();
 		return object;
 	}
 
 	/**
-		Puts whatever this body drives where the body is.
-
-		Called when something is attached and again whenever the body moves.
-		The first of those matters more than it looks: a static body never
-		moves, so it is never in the world's move events, so without this it
-		would be drawn at the origin for ever - and a floor drawn half a
-		metre from where it is, is a floor everything sinks into.
+		Move `object` to the body. `alpha` below 1 interpolates from the previous step.
+		Also needed once for static bodies, which never appear in the move events.
 	**/
-	public function place() {
-		if (object == null) return;
-		object.setPosition(x, y, z);
-		world.quat.set(qx, qy, qz, qw);
-		object.setRotationQuat(world.quat);
+	public function place( alpha = 1.0 ) {
+		if( object == null ) return;
+		placed++;
+
+		var ax = x - World.originX, ay = y - World.originY, az = z - World.originZ;
+		var rx = qx, ry = qy, rz = qz, rw = qw;
+		if( alpha < 1 ) {
+			var k = 1 - alpha;
+			ax = (lastX - World.originX) * k + ax * alpha;
+			ay = (lastY - World.originY) * k + ay * alpha;
+			az = (lastZ - World.originZ) * k + az * alpha;
+			// nlerp, the short way round
+			var a = lastQx * rx + lastQy * ry + lastQz * rz + lastQw * rw < 0 ? -alpha : alpha;
+			rx = lastQx * k + rx * a;
+			ry = lastQy * k + ry * a;
+			rz = lastQz * k + rz * a;
+			rw = lastQw * k + rw * a;
+			var len = Math.sqrt(rx * rx + ry * ry + rz * rz + rw * rw);
+			if( len > 0 ) {
+				rx /= len;
+				ry /= len;
+				rz /= len;
+				rw /= len;
+			}
+		}
+
+		// the object is placed in its parent's frame, not the world's
+		var parent = object.parent;
+		if( parent != null && !parent.getAbsPos().isIdentity() ) {
+			var inv = parent.getInvPos();
+			var px = ax * inv._11 + ay * inv._21 + az * inv._31 + inv._41;
+			var py = ax * inv._12 + ay * inv._22 + az * inv._32 + inv._42;
+			var pz = ax * inv._13 + ay * inv._23 + az * inv._33 + inv._43;
+			quat.set(rx, ry, rz, rw);
+			quat.toMatrix(turn);
+			local.multiply3x4(turn, inv);
+			quat.initRotateMatrix(local);
+			quat.normalize();
+			object.setPosition(px, py, pz);
+			object.setRotationQuat(quat);
+			return;
+		}
+
+		object.setPosition(ax, ay, az);
+		quat.set(rx, ry, rz, rw);
+		object.setRotationQuat(quat);
 	}
 	#end
 
-	// --- where it is -------------------------------------------------------
+	/**
+		Discard the previous transform so drawing jumps to the current one instead of interpolating.
+		`setPosition` and `setRotation` do this. Call it after moving the body by other means.
+	**/
+	public function warp() {
+		lastX = x;
+		lastY = y;
+		lastZ = z;
+		lastQx = qx;
+		lastQy = qy;
+		lastQz = qz;
+		lastQw = qw;
+	}
 
-	/** Fills `x, y, z` and the four of `q` from the world. **/
+	// --- where it is ---
+
+	/** Read the position and rotation from the world. **/
 	public function read() {
-		final b = world.floats;
+		var b = world.floats;
 		Native.world_get_transform(world.w, id, b);
-		x = b.getF32(0);
-		y = b.getF32(4);
-		z = b.getF32(8);
-		qx = b.getF32(12);
-		qy = b.getF32(16);
-		qz = b.getF32(20);
-		qw = b.getF32(24);
+		x = b.getF64(0);
+		y = b.getF64(8);
+		z = b.getF64(16);
+		qx = b.getF64(24);
+		qy = b.getF64(32);
+		qz = b.getF64(40);
+		qw = b.getF64(48);
 	}
 
-	/** Fills `vx, vy, vz` and `wx, wy, wz` from the world. **/
+	/** Read the linear and angular velocity from the world. **/
 	public function readVelocity() {
-		final b = world.floats;
+		var b = world.floats;
 		Native.world_get_velocity(world.w, id, b);
-		vx = b.getF32(0);
-		vy = b.getF32(4);
-		vz = b.getF32(8);
-		wx = b.getF32(12);
-		wy = b.getF32(16);
-		wz = b.getF32(20);
+		vx = b.getF64(0);
+		vy = b.getF64(8);
+		vz = b.getF64(16);
+		wx = b.getF64(24);
+		wy = b.getF64(32);
+		wz = b.getF64(40);
 	}
 
-	/** Puts the body where it is told, at once, through whatever is in the way. **/
-	public function setPosition(x:Float, y:Float, z:Float) {
-		final b = world.floats;
-		b.setF32(0, x);
-		b.setF32(4, y);
-		b.setF32(8, z);
-		b.setF32(12, qx);
-		b.setF32(16, qy);
-		b.setF32(20, qz);
-		b.setF32(24, qw);
+	/** Set the position. This teleports the body. **/
+	public function setPosition( x : Float, y : Float, z : Float ) {
+		var b = world.floats;
+		b.setF64(0, x);
+		b.setF64(8, y);
+		b.setF64(16, z);
+		b.setF64(24, qx);
+		b.setF64(32, qy);
+		b.setF64(40, qz);
+		b.setF64(48, qw);
 		Native.world_set_transform(world.w, id, b);
 		this.x = x;
 		this.y = y;
 		this.z = z;
+		warp();
 	}
 
-	/** A quaternion, x y z w. The body stays where it is. **/
-	public function setRotation(qx:Float, qy:Float, qz:Float, qw:Float) {
+	/** Set the rotation as a quaternion. The position is kept. **/
+	public function setRotation( qx : Float, qy : Float, qz : Float, qw : Float ) {
 		Native.world_set_rotation(world.w, id, qx, qy, qz, qw);
 		this.qx = qx;
 		this.qy = qy;
 		this.qz = qz;
 		this.qw = qw;
+		warp();
 	}
 
 	/**
-		Where a kinematic body should be by the end of the step.
-
-		`setPosition` teleports, which puts a moving platform through
-		whoever is standing on it. This works out the velocity that
-		arrives there instead, so the thing pushes what is in its way. A
-		door, a lift and a piston all want this one.
+		Set the velocity of a kinematic body so that it reaches the target position after `dt`.
+		Unlike `setPosition` this pushes whatever is in the way.
 	**/
-	public function moveTo(x:Float, y:Float, z:Float, dt:Float) {
-		final b = world.floats;
-		b.setF32(0, x);
-		b.setF32(4, y);
-		b.setF32(8, z);
-		b.setF32(12, qx);
-		b.setF32(16, qy);
-		b.setF32(20, qz);
-		b.setF32(24, qw);
-		b.setF32(28, dt);
+	public function moveTo( x : Float, y : Float, z : Float, dt : Float ) {
+		var b = world.floats;
+		b.setF64(0, x);
+		b.setF64(8, y);
+		b.setF64(16, z);
+		b.setF64(24, qx);
+		b.setF64(32, qy);
+		b.setF64(40, qz);
+		b.setF64(48, qw);
+		b.setF64(56, dt);
 		Native.world_set_target(world.w, id, b);
 	}
 
-	// --- how it moves ------------------------------------------------------
+	// --- how it moves ---
 
-	public function setVelocity(x:Float, y:Float, z:Float) {
+	/** Set the linear velocity. Usually in meters per second. **/
+	public function setVelocity( x : Float, y : Float, z : Float ) {
 		Native.world_set_velocity(world.w, id, x, y, z);
 	}
 
-	/** Radians a second about each axis. **/
-	public function setAngularVelocity(x:Float, y:Float, z:Float) {
+	/** Set the angular velocity. Radians per second. **/
+	public function setAngularVelocity( x : Float, y : Float, z : Float ) {
 		Native.world_set_angular_velocity(world.w, id, x, y, z);
 	}
 
-	/** A push that lasts the step, at the centre of mass. **/
-	public function addForce(x:Float, y:Float, z:Float) {
+	/** Apply a force at the center of mass for the next step. **/
+	public function addForce( x : Float, y : Float, z : Float ) {
 		Native.world_add_force_center(world.w, id, x, y, z);
 	}
 
-	/** A push that lasts the step, at a point in the world: it also turns the body. **/
-	public function addForceAt(x:Float, y:Float, z:Float, px:Float, py:Float, pz:Float) {
-		final b = world.floats;
-		b.setF32(0, x);
-		b.setF32(4, y);
-		b.setF32(8, z);
-		b.setF32(12, px);
-		b.setF32(16, py);
-		b.setF32(20, pz);
+	/** Apply a force at a world point for the next step. This also applies a torque. **/
+	public function addForceAt( x : Float, y : Float, z : Float, px : Float, py : Float, pz : Float ) {
+		var b = world.floats;
+		b.setF64(0, x);
+		b.setF64(8, y);
+		b.setF64(16, z);
+		b.setF64(24, px);
+		b.setF64(32, py);
+		b.setF64(40, pz);
 		Native.world_add_force(world.w, id, b);
 	}
 
-	/** A push that happens at once, at the centre of mass. A hit, not a shove. **/
-	public function addImpulse(x:Float, y:Float, z:Float) {
+	/** Apply an impulse at the center of mass. This immediately changes the velocity. **/
+	public function addImpulse( x : Float, y : Float, z : Float ) {
 		Native.world_add_impulse_center(world.w, id, x, y, z);
 	}
 
-	/** A push that happens at once, at a point in the world. **/
-	public function addImpulseAt(x:Float, y:Float, z:Float, px:Float, py:Float, pz:Float) {
-		final b = world.floats;
-		b.setF32(0, x);
-		b.setF32(4, y);
-		b.setF32(8, z);
-		b.setF32(12, px);
-		b.setF32(16, py);
-		b.setF32(20, pz);
+	/** Apply an impulse at a world point. **/
+	public function addImpulseAt( x : Float, y : Float, z : Float, px : Float, py : Float, pz : Float ) {
+		var b = world.floats;
+		b.setF64(0, x);
+		b.setF64(8, y);
+		b.setF64(16, z);
+		b.setF64(24, px);
+		b.setF64(32, py);
+		b.setF64(40, pz);
 		Native.world_add_impulse(world.w, id, b);
 	}
 
-	public function addTorque(x:Float, y:Float, z:Float) {
+	/** Apply a torque for the next step. **/
+	public function addTorque( x : Float, y : Float, z : Float ) {
 		Native.world_add_torque(world.w, id, x, y, z);
 	}
 
-	public function addAngularImpulse(x:Float, y:Float, z:Float) {
+	/** Apply an angular impulse. This immediately changes the angular velocity. **/
+	public function addAngularImpulse( x : Float, y : Float, z : Float ) {
 		Native.world_add_angular_impulse(world.w, id, x, y, z);
 	}
 
-	// --- what it is --------------------------------------------------------
+	// --- what it is ---
 
-	/**
-		How quickly it slows of its own accord, moving and turning. Not
-		friction and not air: a number the solver multiplies velocity by,
-		and what keeps a thing from drifting for ever.
-	**/
-	public function damping(linear:Float, angular:Float):Body {
+	/** Set the linear and angular damping. Damping reduces velocity each step; it is not friction. **/
+	public function damping( linear : Float, angular : Float ) : Body {
 		Native.world_set_damping(world.w, id, linear, angular);
 		return this;
 	}
 
-	/** 0 floats, 1 falls like everything else, 2 falls twice as hard. **/
-	public function gravityFactor(factor:Float):Body {
+	/** Scale the gravity applied to this body. Non-dimensional. **/
+	public function gravityFactor( factor : Float ) : Body {
 		Native.world_set_gravity_factor(world.w, id, factor);
 		return this;
 	}
 
-	/**
-		Which ways it may move and turn. A door is locked out of moving and
-		out of two of the three turns; a barrel that must not tip is locked
-		in turning and free in moving; a top-down game locks everything out
-		of one plane.
-	**/
-	public function lock(moveX = false, moveY = false, moveZ = false, turnX = false, turnY = false,
-			turnZ = false):Body {
+	/** Lock the body out of moving along or turning about each axis. **/
+	public function lock( moveX = false, moveY = false, moveZ = false, turnX = false, turnY = false, turnZ = false ) : Body {
 		var bits = 0;
-		if (moveX) bits |= 1;
-		if (moveY) bits |= 2;
-		if (moveZ) bits |= 4;
-		if (turnX) bits |= 8;
-		if (turnY) bits |= 16;
-		if (turnZ) bits |= 32;
+		if( moveX ) bits |= 1;
+		if( moveY ) bits |= 2;
+		if( moveZ ) bits |= 4;
+		if( turnX ) bits |= 8;
+		if( turnY ) bits |= 16;
+		if( turnZ ) bits |= 32;
 		Native.world_set_locks(world.w, id, bits);
 		return this;
 	}
 
 	/**
-		Whether this body is swept along its path rather than moved to the
-		end of it.
-
-		On for anything small and quick - a bullet, a bolt pulled out of a
-		wall by the air leaving a room - and off for everything else,
-		because it is not free. A 3 cm bolt at 30 m/s covers half a metre
-		in a sixtieth of a second, which is most walls.
+		Treat this body as a high speed object that performs continuous collision detection against dynamic and
+		kinematic bodies, but not other bullet bodies. Bullets should be used sparingly.
 	**/
-	public function bullet(on = true):Body {
+	public function bullet( on = true ) : Body {
 		Native.world_set_bullet(world.w, id, on);
 		return this;
 	}
 
-	/** Whether it may spin more than half a turn in a step instead of being clamped. **/
-	public function allowFastRotation(on = true):Body {
+	/** Allow the body to bypass rotational speed limits. Should only be used for circular objects, like wheels. **/
+	public function allowFastRotation( on = true ) : Body {
 		Native.world_allow_fast_rotation(world.w, id, on);
 		return this;
 	}
 
-	/**
-		Whether it may be put to bed, and how slowly it must be moving to
-		qualify. Something the game reads the position of every frame is
-		kept awake here rather than by nudging it.
-	**/
-	public function allowSleeping(allow:Bool):Body {
+	/** Enable or disable sleeping for this body. **/
+	public function allowSleeping( allow : Bool ) : Body {
 		Native.world_allow_sleeping(world.w, id, allow);
 		return this;
 	}
 
-	public function sleepThreshold(speed:Float):Body {
+	/** Set the sleep speed threshold. Meters per second. **/
+	public function sleepThreshold( speed : Float ) : Body {
 		Native.world_sleep_threshold(world.w, id, speed);
 		return this;
 	}
 
-	public function wake(awake = true) {
+	/** Wake the body, or put it to sleep. **/
+	public function wake( awake = true ) {
 		Native.world_wake(world.w, id, awake);
 	}
 
-	public var awake(get, never):Bool;
+	/** Is the body awake? **/
+	public var awake(get, never) : Bool;
 
-	function get_awake():Bool
+	function get_awake() : Bool {
 		return Native.world_is_active(world.w, id);
+	}
 
-	/**
-		Out of the world without being destroyed: no collision, no
-		simulation, no cost, and its shapes wait where they were. What a
-		level does with the half of it nobody is standing in.
-	**/
-	public function setEnabled(on:Bool) {
+	/** Enable or disable the body. A disabled body does not move or collide. Its shapes are kept. **/
+	public function setEnabled( on : Bool ) {
 		Native.world_set_enabled(world.w, id, on);
 	}
 
-	public function setMotion(motion:Motion) {
+	/** Change the body type. **/
+	public function setMotion( motion : Motion ) {
 		this.motion = motion;
 		Native.world_set_motion_type(world.w, id, motion);
 	}
 
-	public var mass(get, never):Float;
+	/** The mass, usually in kilograms. **/
+	public var mass(get, never) : Float;
 
-	function get_mass():Float
+	function get_mass() : Float {
 		return Native.world_get_mass(world.w, id);
+	}
 
 	/**
-		A mass of the game's choosing rather than one worked out from
-		density and volume. The three inertias are about the body's own
-		axes; leaving them at zero and calling `massFromShapes` afterwards
-		is the way back.
+		Override the mass computed from the shapes. The center of mass and the inertia are in the body frame.
+		`massFromShapes` reverts to the computed mass.
 	**/
-	public function setMass(value:Float, cx = 0.0, cy = 0.0, cz = 0.0, ix = 0.0, iy = 0.0,
-			iz = 0.0) {
-		final b = world.floats;
-		b.setF32(0, value);
-		b.setF32(4, cx);
-		b.setF32(8, cy);
-		b.setF32(12, cz);
-		b.setF32(16, ix);
-		b.setF32(20, iy);
-		b.setF32(24, iz);
+	public function setMass( value : Float, cx = 0.0, cy = 0.0, cz = 0.0, ix = 0.0, iy = 0.0, iz = 0.0 ) {
+		var b = world.floats;
+		b.setF64(0, value);
+		b.setF64(8, cx);
+		b.setF64(16, cy);
+		b.setF64(24, cz);
+		b.setF64(32, ix);
+		b.setF64(40, iy);
+		b.setF64(48, iz);
 		Native.world_set_mass(world.w, id, b);
 	}
 
-	/** Back to a mass worked out from the shapes and their densities. **/
+	/** Compute the mass, center of mass and inertia from the shapes and their densities. **/
 	public function massFromShapes() {
 		Native.world_mass_from_shapes(world.w, id);
 	}
 
-	/** Takes it out of the world for good, with its shapes. **/
+	/** Destroy the body and its shapes. **/
 	public function remove() {
 		world.forget(this);
 		Native.world_remove_body(world.w, id);
 		id = -1;
 		shapes = [];
+	}
+
+	// --- properties ---
+
+	/** Get a float property of the body by its `Property` code. **/
+	public function get( code : Int ) : Float {
+		return Native.body_getf(world.w, id, code);
+	}
+
+	/** Set a float property of the body by its `Property` code. **/
+	public function set( code : Int, value : Float ) {
+		Native.body_setf(world.w, id, code, value);
+	}
+
+	/** Get a boolean property of the body by its `Property` code. **/
+	public function flag( code : Int ) : Bool {
+		return Native.body_getb(world.w, id, code);
+	}
+
+	/** Set a boolean property of the body by its `Property` code. **/
+	public function setFlag( code : Int, on : Bool ) {
+		Native.body_setb(world.w, id, code, on);
+	}
+
+	/**
+		Get a vector property of the body by its `Property` code: a center of mass, the extent,
+		the six locks, the rotation or the nine values of the inertia tensor.
+	**/
+	public function vector( code : Int ) : Array<Float> {
+		var b = world.floats;
+		for( i in 0...9 ) b.setF64(i * 8, 0);
+		Native.body_getv(world.w, id, code, b);
+		var n = code == Property.BODY_LOCKS ? 6 : code == Property.BODY_ROTATION ? 4 : code == Property.BODY_INERTIA ? 9 : 3;
+		return [for( i in 0...n ) b.getF64(i * 8)];
+	}
+
+	/** The linear damping. **/
+	public var linearDamping(get, set) : Float;
+
+	function get_linearDamping() : Float {
+		return get(Property.BODY_LINEAR_DAMPING);
+	}
+
+	function set_linearDamping( v : Float ) : Float {
+		set(Property.BODY_LINEAR_DAMPING, v);
+		return v;
+	}
+
+	/** The angular damping. **/
+	public var angularDamping(get, set) : Float;
+
+	function get_angularDamping() : Float {
+		return get(Property.BODY_ANGULAR_DAMPING);
+	}
+
+	function set_angularDamping( v : Float ) : Float {
+		set(Property.BODY_ANGULAR_DAMPING, v);
+		return v;
+	}
+
+	/** The gravity scale. **/
+	public var gravityScale(get, set) : Float;
+
+	function get_gravityScale() : Float {
+		return get(Property.BODY_GRAVITY_SCALE);
+	}
+
+	function set_gravityScale( v : Float ) : Float {
+		set(Property.BODY_GRAVITY_SCALE, v);
+		return v;
+	}
+
+	/** Is the body enabled? Same as `setEnabled`. **/
+	public var enabled(get, set) : Bool;
+
+	function get_enabled() : Bool {
+		return flag(Property.BODY_ENABLED);
+	}
+
+	function set_enabled( v : Bool ) : Bool {
+		setFlag(Property.BODY_ENABLED, v);
+		return v;
+	}
+
+	/** The body name, for debugging. Box3D keeps its own copy. **/
+	public var name(get, set) : String;
+
+	function get_name() : String {
+		var bytes = Native.body_get_name(world.w, id);
+		return bytes == null ? "" : Buf.cstring(bytes);
+	}
+
+	function set_name( v : String ) : String {
+		Native.body_set_name(world.w, id, Buf.ofString(v));
+		return v;
+	}
+
+	// --- queries ---
+
+	/** Get a world point from a local point. **/
+	public function worldPoint( x : Float, y : Float, z : Float ) : Array<Float> {
+		return point(0, x, y, z);
+	}
+
+	/** Get a world vector from a local vector. **/
+	public function worldVector( x : Float, y : Float, z : Float ) : Array<Float> {
+		return point(1, x, y, z);
+	}
+
+	/** Get the linear velocity of a local point attached to the body. **/
+	public function localPointVelocity( x : Float, y : Float, z : Float ) : Array<Float> {
+		return point(2, x, y, z);
+	}
+
+	/** Get the linear velocity of a world point attached to the body. **/
+	public function worldPointVelocity( x : Float, y : Float, z : Float ) : Array<Float> {
+		return point(3, x, y, z);
+	}
+
+	/** Find the closest point on the body to a world point. Fills `nearX`, `nearY`, `nearZ` and returns the distance, zero inside. **/
+	public function closestPoint( x : Float, y : Float, z : Float ) : Float {
+		var b = world.floats;
+		b.setF64(0, x);
+		b.setF64(8, y);
+		b.setF64(16, z);
+		var d = Native.body_closest(world.w, id, b, b);
+		nearX = b.getF64(0);
+		nearY = b.getF64(8);
+		nearZ = b.getF64(16);
+		return d;
+	}
+
+	/** Get the bounding box of all the body's shapes: six floats, the lower corner then the upper. **/
+	public function aabb( out : Buf ) {
+		Native.body_aabb(world.w, id, out);
+	}
+
+	/** Get the joints attached to the body. **/
+	public function jointList() : Array<Joint> {
+		var b = world.floats;
+		var n = Native.body_joints(world.w, id, b, 64);
+		var out = [];
+		for( i in 0...n ) {
+			var jid = b.getI32(i * 8);
+			for( j in world.joints ) if( j.id == jid ) out.push(j);
+		}
+		return out;
+	}
+
+	/** Get the touching contacts of the body as manifolds, one per shape pair, up to four points each. **/
+	public function contacts() : Array<Manifold> {
+		var b = world.eventBuffer;
+		var n = Native.body_contacts(world.w, id, b, World.MAX_EVENTS);
+		return Manifold.read(world, b, n);
+	}
+
+	/** Cast a ray against this body alone. Returns true on a hit, with the result in the world's `hitShape`, `hitAt`, `hitX` and the rest. **/
+	public function castRay( x : Float, y : Float, z : Float, dx : Float, dy : Float, dz : Float, category : Float = 1, mask : Float = -1 ) : Bool {
+		var b = world.floats;
+		b.setF64(0, x);
+		b.setF64(8, y);
+		b.setF64(16, z);
+		b.setF64(24, dx);
+		b.setF64(32, dy);
+		b.setF64(40, dz);
+		b.setF64(48, category);
+		b.setF64(56, mask);
+		var hit = Native.body_cast_ray(world.w, id, b, world.results);
+		world.readBodyCast();
+		return hit;
+	}
+
+	/**
+		Cast a shape against this body alone. The shape is one to eight points and a radius: one point for a sphere,
+		two for a capsule, eight for a box. Results as `castRay`.
+	**/
+	public function castShape( points : Array<Float>, radius : Float, x : Float, y : Float, z : Float, dx : Float, dy : Float, dz : Float, category : Float = 1, mask : Float = -1 ) : Bool {
+		var b = proxy(points, radius, x, y, z);
+		var after = 4 + Std.int(points.length / 3) * 3 + 1;
+		b.setF64(after * 8, dx);
+		b.setF64((after + 1) * 8, dy);
+		b.setF64((after + 2) * 8, dz);
+		b.setF64((after + 3) * 8, category);
+		b.setF64((after + 4) * 8, mask);
+		var hit = Native.body_cast_shape(world.w, id, b, world.results);
+		world.readBodyCast();
+		return hit;
+	}
+
+	/** Test a shape given as points and a radius, placed at a point, for overlap with this body. **/
+	public function overlapShape( points : Array<Float>, radius : Float, x : Float, y : Float, z : Float, category : Float = 1, mask : Float = -1 ) : Bool {
+		var b = proxy(points, radius, x, y, z);
+		var after = 4 + Std.int(points.length / 3) * 3 + 1;
+		b.setF64(after * 8, category);
+		b.setF64((after + 1) * 8, mask);
+		return Native.body_overlap_shape(world.w, id, b);
+	}
+
+	/** The same overlap test with the body at the given position and rotation instead of its own. **/
+	public function overlapShapeAt( points : Array<Float>, radius : Float, x : Float, y : Float, z : Float, bx : Float, by : Float, bz : Float, qx : Float, qy : Float, qz : Float, qw : Float, category : Float = 1, mask : Float = -1 ) : Bool {
+		var b = proxy(points, radius, x, y, z);
+		var after = 4 + Std.int(points.length / 3) * 3 + 1;
+		b.setF64(after * 8, category);
+		b.setF64((after + 1) * 8, mask);
+		var xf = world.results;
+		for( i => v in [bx, by, bz, qx, qy, qz, qw] ) xf.setF64(i * 8, v);
+		return Native.body_overlap_shape_at(world.w, id, b, xf);
+	}
+
+	/**
+		Collide a capsule mover with this body alone, gathering collision planes as `World.collideCapsule` does.
+		Read them with `World.plane`. Returns the plane count.
+	**/
+	public function collideCapsule( x : Float, y : Float, z : Float, x1 : Float, y1 : Float, z1 : Float, x2 : Float, y2 : Float, z2 : Float, radius : Float, category : Float = 1, mask : Float = -1 ) : Int {
+		var b = world.floats;
+		b.setF64(0, x);
+		b.setF64(8, y);
+		b.setF64(16, z);
+		b.setF64(24, x1);
+		b.setF64(32, y1);
+		b.setF64(40, z1);
+		b.setF64(48, x2);
+		b.setF64(56, y2);
+		b.setF64(64, z2);
+		b.setF64(72, radius);
+		b.setF64(80, category);
+		b.setF64(88, mask);
+		return Native.body_collide_mover(world.w, id, b, world.eventBuffer, 32);
+	}
+
+	/**
+		Time of impact of a capsule swept along a translation against this body alone.
+		Returns the fraction of the translation, 1 for no hit. The point and normal go to the world's `hitX`, `hitNx` and the rest.
+	**/
+	public function sweepCapsule( x : Float, y : Float, z : Float, x1 : Float, y1 : Float, z1 : Float, x2 : Float, y2 : Float, z2 : Float, radius : Float, dx : Float, dy : Float, dz : Float, category : Float = 1, mask : Float = -1 ) : Float {
+		var b = world.floats;
+		b.setF64(0, x);
+		b.setF64(8, y);
+		b.setF64(16, z);
+		b.setF64(24, x1);
+		b.setF64(32, y1);
+		b.setF64(40, z1);
+		b.setF64(48, x2);
+		b.setF64(56, y2);
+		b.setF64(64, z2);
+		b.setF64(72, radius);
+		b.setF64(80, dx);
+		b.setF64(88, dy);
+		b.setF64(96, dz);
+		b.setF64(104, category);
+		b.setF64(112, mask);
+		var r = world.results;
+		var fraction = Native.body_toi_mover(world.w, id, b, r);
+		world.setHit(world.shapeOf(r.getI32(56)), r.getF64(0), r.getF64(8), r.getF64(16), r.getF64(24), r.getF64(32), r.getF64(40), r.getF64(48));
+		return fraction;
+	}
+
+	/**
+		Time of impact as `sweepCapsule`, with the body moving over the step.
+		`from` and `to` are its transforms at either end, seven values each: position then quaternion.
+	**/
+	public function sweepCapsuleWhile( x : Float, y : Float, z : Float, x1 : Float, y1 : Float, z1 : Float, x2 : Float, y2 : Float, z2 : Float, radius : Float, dx : Float, dy : Float, dz : Float, from : Array<Float>, to : Array<Float>, category : Float = 1, mask : Float = -1 ) : Float {
+		var b = world.floats;
+		for( i => v in [x, y, z, x1, y1, z1, x2, y2, z2, radius, dx, dy, dz, category, mask] ) b.setF64(i * 8, v);
+		var xf = world.eventBuffer;
+		for( i in 0...7 ) xf.setF64(i * 8, from[i]);
+		for( i in 0...7 ) xf.setF64((7 + i) * 8, to[i]);
+		var r = world.results;
+		var fraction = Native.body_toi_mover_sweep(world.w, id, b, r, xf);
+		world.setHit(world.shapeOf(r.getI32(56)), r.getF64(0), r.getF64(8), r.getF64(16), r.getF64(24), r.getF64(32), r.getF64(40), r.getF64(48));
+		return fraction;
+	}
+
+	inline function keep( shapeId : Int ) : Shape {
+		var s = new Shape(this, shapeId);
+		shapes.push(s);
+		world.byShape[shapeId] = s;
+		return s;
+	}
+
+	function point( kind : Int, x : Float, y : Float, z : Float ) : Array<Float> {
+		var b = world.floats;
+		b.setF64(0, x);
+		b.setF64(8, y);
+		b.setF64(16, z);
+		Native.body_point(world.w, id, kind, b, b);
+		return [b.getF64(0), b.getF64(8), b.getF64(16)];
+	}
+
+	function proxy( points : Array<Float>, radius : Float, x : Float, y : Float, z : Float ) : Buf {
+		var count = Std.int(points.length / 3);
+		if( count < 1 || count > 8 ) throw "box3d: a shape proxy is one to eight points";
+		var b = world.floats;
+		b.setF64(0, x);
+		b.setF64(8, y);
+		b.setF64(16, z);
+		b.setF64(24, count);
+		for( i in 0...count * 3 ) b.setF64((4 + i) * 8, points[i]);
+		b.setF64((4 + count * 3) * 8, radius);
+		return b;
 	}
 }

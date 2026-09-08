@@ -1,0 +1,6 @@
+-lib heaps
+-cp ../src
+-cp .
+-main Main
+-js ../build/samples-web/sample.js
+-dce full

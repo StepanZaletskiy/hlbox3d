@@ -1,214 +1,235 @@
-# hlbox3d
+<br/>
+<p align="center">
+    <picture>
+        <source media="(prefers-color-scheme: dark)" srcset="docs/images/logo-dark.svg">
+        <img width="50%" src="docs/images/logo.svg" alt="hlbox3d">
+    </picture>
+</p>
+<p align="center">
+    <a href="https://github.com/erincatto/box3d" target="_blank">Box3D</a> physics for
+    <a href="https://heaps.io" target="_blank">Heaps</a> —
+    <a href="https://hashlink.haxe.org" target="_blank">HashLink</a> and JS/WebGL
+</p>
 
-Box3D for HashLink: a native module and a thin Haxe side, written to the
-same shape as [hljolt](https://github.com/StepanZaletskiy/hljolt) next
-door so that the two can be put side by side and measured.
+<br/>
+<p align="center">
+    <a href="LICENSE" target="_blank">
+        <img src="https://img.shields.io/github/license/macaodev/hlbox3d.svg" alt="GitHub license">
+    </a>
+    <a href="https://github.com/macaodev/hlbox3d/releases" target="_blank">
+        <img src="https://img.shields.io/github/tag/macaodev/hlbox3d.svg" alt="GitHub tag (latest SemVer)">
+    </a>
+    <a href="https://github.com/macaodev/hlbox3d/actions" target="_blank">
+        <img src="https://img.shields.io/github/actions/workflow/status/macaodev/hlbox3d/build.yml" alt="Build workflow status">
+    </a>
+    <a href="https://github.com/macaodev/hlbox3d/commits" target="_blank">
+        <img src="https://img.shields.io/github/commit-activity/y/macaodev/hlbox3d.svg" alt="GitHub commit activity">
+    </a>
+    <a href="https://lib.haxe.org/p/hlbox3d" target="_blank">
+        <img src="https://img.shields.io/badge/haxelib-hlbox3d-orange.svg" alt="haxelib">
+    </a>
+</p>
+<br/>
 
-Box3D is Erin Catto's 3D rigid body engine, released June 2026 under the
-MIT licence. It descends from Rubicon Light, an experimental branch of
-Valve's own physics that Dirk Gregorius handed over; Catto rebuilt it
-around the ideas of Box2D.
+[hlbox3d](https://github.com/macaodev/hlbox3d) is [Box3D](https://github.com/erincatto/box3d), Erin Catto's **3D rigid body engine**, for Haxe. The solver is **Box3D itself**, compiled as it is into a native module for [HashLink](https://hashlink.haxe.org) and into wasm for the browser; the Haxe side, the `box3d` package, is **the same code on every target**. Bodies, shapes, joints, queries and events, meshes and height fields, a character mover and a ragdoll, recording and replay, with a **fixed step and interpolated drawing** for [Heaps](https://heaps.io).
 
-## Why a second binding
+This repository contains the **library**: the C shim, the Haxe package, a minimal sample and the ports of Box3D's unit tests.
 
-The first one works. The game runs on it, seventy-five sample scenes run
-on it, and nothing about it is in the way.
 
-This one exists to answer a question with a number. Box3D is said to be
-faster than what is on the market; its own documentation says nothing of
-the sort, and neither says anything about the machine the game is built
-on. So: the same pyramid, the same step, one thread, both libraries.
+## 🚀&nbsp; Installation
 
-## The number
+### Install Haxe
 
-One machine, one thread each unless a row says otherwise, both libraries
-built by the same compiler, the same pyramid of two-metre boxes dropped
-onto a floor. Sleeping off, so that a library is not credited for a cheap
-step it reached by putting the pile to bed. Penetration slop set to 5 mm
-on both, because Jolt allows 2 cm by default and Box3D 5 mm, and over a
-stack that difference is centimetres of sag belonging to neither solver.
+Download and install [Haxe](https://haxe.org/download/) 4.3 or later.
+Check with `haxe --version`.
 
-The dial is different on each and cannot be made the same: Box3D solves a
-step over substeps and that is how it is asked for a firmer stack; Jolt
-runs the step once per dial and turns ten velocity iterations inside each.
-So both are run across their own range and the rows are read by what they
-bought - the cost of a settled step, and how far the top box has sunk
-below where it should be standing. Two runs of the same configuration
-came out 3 to 5 per cent apart, which is the precision of everything
-below.
+### Install HashLink and Heaps
 
-1240 boxes, fifteen layers:
+Follow the [Heaps installation guide](https://heaps.io/documentation/installation.html):
+HashLink on your PATH, then `haxelib install heaps` and `hlsdl` or `hldx`.
+Check with `hl` in a terminal. Skip this for a browser-only game.
 
-| dial | jolt | box3d |
-|---|---|---|
-| 1 | 12.9 ms, 6.7 cm | **3.9 ms**, 11.8 cm |
-| 2 | 24.1 ms, 3.8 cm | **5.4 ms**, 3.2 cm |
-| 4 | 46.5 ms, 1.4 cm | **8.4 ms**, 0.7 cm |
+### Install hlbox3d
 
-16206 boxes, thirty-six layers, which is Box3D's own showcase:
+The Haxe side comes from git, the way Heaps does:
 
-| dial | jolt | box3d |
-|---|---|---|
-| 1 | 413 ms, 21 cm | **130 ms**, *collapsed* |
-| 2 | 734 ms, 16 cm | **160 ms**, 17 cm |
-| 4 | not run | 222 ms, 4.8 cm |
+```
+haxelib git hlbox3d https://github.com/macaodev/hlbox3d
+```
 
-Read across rather than down, matching firmness to firmness. At 3 cm of
-sag on the small pyramid, Box3D is four and a half times cheaper. At the
-tightest setting, five and a half. On the large one, at 16 to 21 cm, it
-is four and a half again.
+Or as a submodule of the game, with `-cp hlbox3d/src` instead of `-lib`.
 
-Threads, on the small pyramid at matched firmness:
+### Install the native module
 
-| ways of parallel | jolt | box3d |
-|---|---|---|
-| 1 | 24.9 ms | **5.7 ms** |
-| 2 | 18.1 ms | **3.3 ms** |
-| 4 | 11.7 ms | **2.1 ms** |
-| 8 | 8.6 ms | **1.6 ms** |
-| 16 | 8.4 ms | **1.4 ms** |
+HashLink loads `box3d.hdll` from next to `hl.exe` on Windows and from
+the library path on Linux. This downloads the prebuilt one for this
+version from the GitHub release and puts it there:
 
-Box3D is ahead by four to six times at every width, and scales the
-better of the two besides: four times faster on sixteen ways where Jolt
-manages three and stops improving after eight.
+```
+haxelib run hlbox3d install            # or: haxelib run hlbox3d install <dir>
+```
 
-The gap has a cause and it is the thing Box3D was built for. To reach
-3 cm of sag Jolt runs twenty solver passes over the step and Box3D about
-four. Both arrive; one does five times the work to get there.
+No compiler is needed. For the browser, `--web <dir>` fetches `box3d.js`
+and `box3d.wasm` instead, see [docs/web.md](docs/web.md).
 
-### What this does not say
+### Verify the installation
 
-Three earlier versions of this table were wrong, each because of a
-default in the Jolt binding rather than anything about Jolt. The contact
-buffers were fixed-size and silently overflowed on the large pyramid; the
-penetration slop differed fourfold between the libraries; and joltc reads
-a thread count of zero as "every core on the machine", so every run that
-believed it was single threaded was running on thirty-five workers. The
-numbers above are from after all three were fixed. Their existence is the
-argument for the sag column: a step that got cheaper while the pile came
-apart looks exactly like a fast solver.
+Add `-lib hlbox3d` to your hxml, put the first world below in `Main.hx` and run
+it with `hl`. A crate falls on a floor.
 
-And a pyramid is one workload. It is the one Box3D was built around and
-the one Jolt is weakest at, and it says nothing about a scene of a few
-hundred small things mostly asleep, a character, and some raycasts -
-which is what the game actually runs. That measurement has not been made.
-## What it binds so far
 
-A world, three shapes, bodies as ids, a step, and the transforms read
-back. That is exactly enough to run the bench and no more. Nothing here
-is a replacement for the Jolt binding yet, and the list of what would
-have to be written before it could be is at the bottom.
+## 🌍&nbsp; First world
+
+Inside an `hxd.App`, where `s3d` is the scene and `dt` the frame time:
 
 ```haxe
-final world = new box3d.World(4096);
-world.setGravity(0, 0, -9.81);
-world.addBox(100, 100, 1, 0, 0, -1, Static);
-final crate = world.addBox(0.5, 0.5, 0.5, 0, 0, 4, Dynamic);
+var world = new box3d.World();
+world.setGravity(0, 0, -10);
+world.addBox(20, 20, 0.5, 0, 0, -0.5, Static).attach(s3d);   // a floor
+world.addBox(0.4, 0.4, 0.4, 0, 0, 3).attach(s3d);            // a crate above it
 
-world.step(1 / 60);
-world.read(crate);
-trace(world.x, world.y, world.z);
+// once a frame
+world.update(dt);   // steps at a fixed rate and moves what it draws
 ```
 
-## The two rules
+`attach` gives a body one mesh per shape under the object you pass;
+replace `body.object` with your own model whenever you have one. Box
+sizes are half extents, as in Box3D. [docs/first_world.md](docs/first_world.md)
+is the complete program with what each line does; everything past it,
+from joints to queries to characters, starts at [docs/overview.md](docs/overview.md).
 
-Both are carried over from the Jolt binding, because both were learned
-the hard way and neither is about Jolt.
 
-**Nothing in the shim calls back into Haxe.** Box3D suits this better
-than Jolt did: contacts and sensor overlaps arrive as event buffers to be
-read after the step, rather than as callbacks from inside it. There is
-nothing to drain into a buffer of our own, because the buffer is already
-there.
+## 🎮&nbsp; Sample
 
-**No primitive takes more than six floating-point arguments.** HashLink's
-JIT on Linux passes them in XMM0 to XMM5, and a seventh arrives as
-whatever was left in the register. Anything with more crosses as a byte
-buffer of f32.
+[samples/Main.hx](samples/Main.hx) is the complete program: a floor, a
+hundred spheres and boxes falling on it, an orbit camera, Space to start
+over, and the bodies still awake in the window title as the pile settles.
+The same file builds to both targets.
 
-## Bodies are numbers
-
-A Box3D body handle is eight bytes: a slot, the world it belongs to, and
-a generation counter, so that a handle to a destroyed body answers "no
-such body" instead of quietly addressing whoever took its slot. Jolt does
-the same thing in four bytes and a smaller counter.
-
-Eight bytes do not fit in a HashLink int, and the game is written
-throughout on "a body is a number", so the shim keeps a table: our number
-indexes an array of theirs. One array lookup per call, numbers reused
-through a free list, and the same table gives a validity check of its own.
-
-## Where the two APIs really differ
-
-Not in the wrapping - in the libraries.
-
-A Jolt shape is a thing of its own, refcounted, that any number of bodies
-may share. A Box3D shape is made on a body and belongs to it. So the
-calls here make a body and its shape together, and mass comes from
-density and volume rather than being handed over.
-
-A Jolt capsule is built along its own y and stood up with a quarter turn;
-a Box3D capsule is two points and a radius, and says which way it points
-itself.
-
-## Building
-
-`tools/build.ps1` does the whole of it on Windows: it finds CMake where
-Visual Studio or the standalone installer left it, downloads the
-HashLink release the CI job uses, and builds Release. `-Bench` builds
-and then runs the pyramid.
-
-By hand, or on Linux:
+HashLink:
 
 ```
-cmake -S . -B build -DHL_ROOT=vendor/hashlink        # a built checkout
-cmake -S . -B build -DHL_INCLUDE=... -DHL_LIB=...    # an unpacked release
-cmake --build build
-haxe test/bench.hxml
+cd samples && haxe sample.hxml
+cd ../build/samples && hl sample.hl     # with box3d.hdll and sdl.hdll beside hl
 ```
 
-`.github/workflows/build.yml` does both on Linux and Windows and runs
-the bench on each. It has never run: this repository has no remote yet.
+Browser:
 
-## What is not here yet
+```
+cd samples && haxe sample_js.hxml
+haxelib run hlbox3d install --web ../build/samples-web
+cp sample.html ../build/samples-web/
+```
 
-Almost everything, and the shortness of that list is about this binding
-rather than about Box3D. Eighteen primitives are bound. Box3D publishes
-five hundred and eighty-five functions.
+then serve `build/samples-web` over http and open `sample.html`; a page
+cannot fetch the wasm from `file://`.
 
-What is bound: a world, three shapes, bodies as ids, a step, transforms
-and velocities read back. That is exactly enough to run the bench.
 
-What Box3D has and this does not yet reach: spheres, capsules, convex
-hulls, meshes, height fields and baked compounds; nine kinds of joint;
-raycasts, shape casts and overlap queries against each of those shapes;
-sensors and contact, body and joint event streams; per-body sleep
-thresholds; and `b3World_CastMover` / `b3World_CollideMover`, which are
-the pieces a character controller is built out of. All of it is a shim
-away.
+## 🌐&nbsp; Web
 
-What Box3D does not have at all, and the game currently leans on:
+The same shim compiled to wasm, `box3d.js` and `box3d.wasm`, for Haxe's
+JavaScript target. Using them needs nothing beyond `haxe -js`:
+`haxelib run hlbox3d install --web <dir>` puts both files where the page
+is. Load `box3d.js` by a script tag before your own, and wait for the
+module before the first world:
 
-- **Soft bodies.** No counterpart of any kind. Nine of the showcase
-  scenes are soft bodies.
-- **Ragdolls as a system.** There are joints, but no skeleton, no pose,
-  and nothing like `DriveToPoseUsingMotors` - which is what makes the
-  puppet walk rather than hang. The samples ship a reference one -
-  `shared/human.c`, fourteen bones, joints with friction and a spring,
-  and motor anchors to drive them - so this is a port rather than an
-  invention.
-- **Buoyancy.** No counterpart, though for boxes and spheres this is an
-  impulse from the submerged volume and is perhaps thirty lines.
-- **A vehicle model.** `b3WheelJoint` is a good one - suspension,
-  steering, a limit, a spin motor - but it is a mechanical joint, not
-  Jolt's vehicle: no tyre friction curves, no engine, gearbox or
-  differential, no tracks. That part would be written by hand.
-- **Rollback.** Box3D says outright that a world cannot be set back to
-  a prior state and resumed: it caches contacts, warm-starting and sleep
-  state between steps, which is half of why it is quick. Jolt has
-  `SaveState` / `RestoreState` built for exactly that, though joltc does
-  not reach them either. This only matters to netcode that predicts and
-  rewinds; a server-authoritative game never asks for it.
+```haxe
+box3d.Wasm.load().then(_ -> new Main());
+```
 
-That list is the price of a move, and it is why this repository is a
-measurement before it is anything else.
+Everything else is the same code on both. Building the module yourself
+is under Working on it below.
+
+
+## 📖&nbsp; Documentation
+
+- [docs/overview.md](docs/overview.md): where to start, units and axes, which classes a game uses.
+- [docs/first_world.md](docs/first_world.md): the complete first program, line by line.
+- [docs/simulation.md](docs/simulation.md): the world, bodies and shapes, stepping, forces, sleep, events, joints.
+- [docs/collision.md](docs/collision.md): hulls, meshes, height fields, compounds; rays, casts, overlaps; collision without a world.
+- [docs/drawing.md](docs/drawing.md): what `attach` draws, and drawing a body yourself.
+- [docs/character.md](docs/character.md): the capsule mover and the ragdoll.
+- [docs/recording.md](docs/recording.md): recording a world and replaying it.
+- [docs/loose_ends.md](docs/loose_ends.md): user data, coordinates, lifetimes, threads, Box3D's limits.
+- [docs/faq.md](docs/faq.md): the questions and the mistakes everyone makes once.
+- [docs/web.md](docs/web.md), [docs/large_worlds.md](docs/large_worlds.md), [docs/tests.md](docs/tests.md).
+- [docs/reference.md](docs/reference.md): every public member of every class, with its doc line.
+
+
+## 🛠️&nbsp; Working on it
+
+For a change to the binding, or a Box3D newer than the release.
+
+### Build from source
+
+CMake fetches Box3D and HashLink itself, nothing to clone by hand; the
+same commands on Windows and Linux. Linux wants `build-essential cmake git`
+first, Windows a Visual Studio with C.
+
+```
+git clone https://github.com/macaodev/hlbox3d
+cd hlbox3d
+cmake -S . -B build && cmake --build build --config Release
+haxelib dev hlbox3d .
+haxelib run hlbox3d install
+```
+
+`haxelib dev` points the library at the checkout, so every rebuild is
+what the game runs. The shim is `src/box3d_hl.c`, the Haxe side
+`src/box3d`. `-DHLBOX3D_LARGE_WORLD=ON` configures the double-precision
+module, into a build directory of its own. Box3D's assertions come with
+the configuration, as they do for Box3D itself: `--config RelWithDebInfo`
+keeps them in the module, Release drops them.
+
+### Build the web module
+
+Takes the [Emscripten SDK](https://emscripten.org/docs/getting_started/downloads.html),
+the C-to-wasm compiler, the way the module for HashLink takes a C
+compiler. Once, anywhere, then activate it in the shell that builds:
+
+```
+git clone https://github.com/emscripten-core/emsdk
+cd emsdk
+./emsdk install latest && ./emsdk activate latest    # emsdk.bat on Windows
+source ./emsdk_env.sh                                  # emsdk_env.bat on Windows
+```
+
+That puts `emcc`, `emcmake` and node on PATH. The build wants
+[Ninja](https://github.com/ninja-build/ninja/releases) too, one file,
+since Visual Studio's generator cannot drive emcc. Then, from the library:
+
+```
+emcmake cmake -S . -B build-web -G Ninja -DCMAKE_BUILD_TYPE=Release
+cmake --build build-web
+```
+
+CI does the same in the `web` job, so a change to the shim is tried
+there even on a machine without the SDK.
+
+### Run the checks
+
+Box3D's own unit tests, through the binding, on whichever module the
+build directory holds; on the web build they run under node:
+
+```
+cmake --build build --config Release --target check
+cmake --build build-web --target check
+```
+
+[docs/tests.md](docs/tests.md) says how to compare the output with
+Box3D's own test run.
+
+
+## 🤝&nbsp; Found a bug? Missing a feature?
+
+**File an issue** on [macaodev/hlbox3d](https://github.com/macaodev/hlbox3d/issues), with a recording if the world misbehaves: `world.record` writes one, and it replays exactly, see [docs/recording.md](docs/recording.md). If you already have the fix, **a pull request is welcome**; the shim follows Box3D's own style and the Haxe side follows Heaps', and `cmake --build build --target check` must stay green.
+
+
+## ✅&nbsp; Requirements
+
+hlbox3d needs **Haxe 4.3 or later**. A desktop game needs **HashLink 1.16**, the version the module is built against, and **Heaps**; a browser game needs only a browser with **WebAssembly**. Without Heaps on the class path the physics compiles alone with `-D box3d_no_heaps`. The Box3D inside is the commit pinned in [CMakeLists.txt](CMakeLists.txt).
+
+
+## 📘&nbsp; License
+
+hlbox3d is released under the terms of the [MIT License](LICENSE). Box3D is MIT.
