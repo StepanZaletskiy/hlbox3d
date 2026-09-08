@@ -12,11 +12,10 @@
 </p>
 
 <p align="center">
-    <b>Try it now:</b> <a href="https://stepanzaletskiy.github.io/hlbox3d/" target="_blank">▶&nbsp; play the Driving sample in WebGL</a>
-</p>
-
-<p align="center">
     <a href="https://stepanzaletskiy.github.io/hlbox3d/" target="_blank"><img width="80%" src="docs/images/driving.gif" alt="The Driving sample: a forklift on wheel joints, crates that report their hits, a recording played back"></a>
+</p>
+<p align="center">
+    <b>Try it now:</b> <a href="https://stepanzaletskiy.github.io/hlbox3d/" target="_blank">▶&nbsp; play the Driving sample in WebGL</a>
 </p>
 
 <br/>
