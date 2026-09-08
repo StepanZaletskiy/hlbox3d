@@ -22,6 +22,9 @@
     <a href="https://github.com/StepanZaletskiy/hlbox3d/actions" target="_blank">
         <img src="https://img.shields.io/github/actions/workflow/status/StepanZaletskiy/hlbox3d/build.yml" alt="Build workflow status">
     </a>
+    <a href="docs/tests.md">
+        <img src="https://img.shields.io/badge/Box3D%20tests-223%20of%20256%20ported-brightgreen.svg" alt="Box3D tests ported">
+    </a>
     <a href="https://github.com/StepanZaletskiy/hlbox3d/commits" target="_blank">
         <img src="https://img.shields.io/github/commit-activity/y/StepanZaletskiy/hlbox3d.svg" alt="GitHub commit activity">
     </a>

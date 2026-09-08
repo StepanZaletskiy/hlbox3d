@@ -84,7 +84,21 @@ jobs:
       - name: Run the checks
         run: |
           set -eux -o pipefail
-          cmake --build build --target check 2>&1 | tail -5
+          cmake --build build --target check 2>&1 | tee build/check.log | tail -5
+
+      # Box3D's own test binary, built from the same fetched sources and run
+      # beside ours, then the two outputs compared subtest for subtest. The
+      # README claims a number; this is what keeps it true when Box3D grows
+      # a test.
+      - name: Parity with Box3D's own tests
+        run: |
+          set -eux -o pipefail
+          cmake -S build/_deps/box3d-src -B build/box3d-test -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release -DBOX3D_UNIT_TESTS=ON \
+            -DBOX3D_SAMPLES=OFF -DBOX3D_BENCHMARKS=OFF
+          cmake --build build/box3d-test -j"$(nproc)" --target test
+          build/box3d-test/bin/test > build/theirs.txt
+          pwsh ./.github/parity.ps1 -Theirs build/theirs.txt -Ours build/check.log
 
       # The other build of the module: positions as doubles, for worlds
       # too big for a float. Built here rather than only on a release
