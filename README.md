@@ -26,7 +26,7 @@
         <img src="https://img.shields.io/github/commit-activity/y/StepanZaletskiy/hlbox3d.svg" alt="GitHub commit activity">
     </a>
     <a href="https://lib.haxe.org/p/hlbox3d" target="_blank">
-        <img src="https://img.shields.io/badge/haxelib-hlbox3d-orange.svg" alt="haxelib">
+        <img src="https://badgen.net/haxelib/v/hlbox3d" alt="haxelib">
     </a>
 </p>
 <br/>
