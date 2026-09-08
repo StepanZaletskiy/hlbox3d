@@ -3,10 +3,10 @@
 	"url": "https://github.com/StepanZaletskiy/hlbox3d",
 	"license": "MIT",
 	"tags": ["physics", "hashlink", "heaps", "box3d", "3d"],
-	"description": "Box3D rigid body physics for HashLink, Heaps and the web: bodies, shapes, joints, queries, events, meshes, height fields, a character mover and a ragdoll, with a fixed step and interpolated drawing.",
+	"description": "Box3D physics for Heaps — HashLink and JS/WebGL",
 	"version": "0.1.0",
 	"releasenote": "First release.",
-	"contributors": ["macaodev"],
+	"contributors": ["StepanZaletskii"],
 	"classPath": "src/",
 	"main": "Run",
 	"dependencies": {}
