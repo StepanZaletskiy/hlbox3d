@@ -71,8 +71,8 @@ jobs:
         run: |
           set -eux
           nm -D --defined-only build/box3d.hdll > exports.txt
-          for want in box3d_init box3d_world_create box3d_world_add_box \
-                      box3d_world_add_sphere box3d_world_add_capsule \
+          for want in box3d_init box3d_world_create box3d_world_add_body \
+                      box3d_shape_box box3d_shape_sphere box3d_shape_capsule \
                       box3d_world_step box3d_world_get_transform; do
             grep -q " $want\$" exports.txt || { echo "$want missing from box3d.hdll"; exit 1; }
           done
