@@ -303,23 +303,25 @@ jobs:
           echo "HAXE_STD_PATH=$PWD/haxe/std" >> "$GITHUB_ENV"
 
       # Heaps from git, as the README installs it: the sample is written
-      # against its master, and the haxelib release lags it. format, its
-      # one dependency, comes with it.
+      # against its master, and the haxelib release lags it. format is its
+      # one dependency. Plain clones on the class path, no haxelib to set
+      # up on a runner.
       - name: Get Heaps
         run: |
           set -eux
-          haxelib setup "$PWD/haxelib"
-          haxelib git heaps https://github.com/HeapsIO/heaps.git --quiet
+          git clone --depth 1 -q https://github.com/HeapsIO/heaps.git heaps
+          git clone --depth 1 -q https://github.com/HaxeFoundation/format.git format
 
       - uses: actions/download-artifact@v4
         with:
           name: box3d-web
           path: build/samples-web
 
+      # samples/sample_js.hxml with the two libraries as class paths.
       - name: Build the sample
         run: |
           set -eux
-          (cd samples && haxe sample_js.hxml)
+          haxe -cp heaps -cp format -cp src -cp samples -main Main -js build/samples-web/sample.js -dce full
           cp samples/sample.html build/samples-web/index.html
           ls -la build/samples-web
 
