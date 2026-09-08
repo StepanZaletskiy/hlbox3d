@@ -153,4 +153,4 @@ it is made.
 
 ---
 
-<sub>← [First world](first_world.md) · [Documentation](overview.md) · [Collision](collision.md) →</sub>
+<sub>← [The sample](sample.md) · [Documentation](overview.md) · [Collision](collision.md) →</sub>

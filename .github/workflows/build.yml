@@ -8,6 +8,8 @@
 #            release archive the game builds against, never built here
 #   web      the same shim as box3d.js and box3d.wasm by Emscripten, the
 #            checks compiled to JavaScript and run under node
+#   pages    the Driving sample built for the browser on that module and
+#            put on GitHub Pages, from main only
 #
 # The checks are Box3D's own unit tests run through the binding, on the
 # float module, on the large-world one and on the web one; they are what
@@ -271,6 +273,64 @@ jobs:
             build-web/box3d.js
             build-web/box3d.wasm
           retention-days: 14
+
+  # The sample in the browser, at https://stepanzaletskiy.github.io/hlbox3d/:
+  # samples/ compiled with haxe -js against the web module the job above
+  # just built and checked, with sample.html as the index. Only from main,
+  # so the page is what the README describes.
+  pages:
+    needs: [web]
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-22.04
+    timeout-minutes: 15
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Get Haxe
+        run: |
+          set -eux
+          curl -fsSL -o haxe.tar.gz \
+            https://github.com/HaxeFoundation/haxe/releases/download/4.3.6/haxe-4.3.6-linux64.tar.gz
+          mkdir -p haxe && tar -xzf haxe.tar.gz -C haxe --strip-components=1
+          echo "$PWD/haxe" >> "$GITHUB_PATH"
+          echo "HAXE_STD_PATH=$PWD/haxe/std" >> "$GITHUB_ENV"
+
+      # Heaps from git, as the README installs it: the sample is written
+      # against its master, and the haxelib release lags it. format, its
+      # one dependency, comes with it.
+      - name: Get Heaps
+        run: |
+          set -eux
+          haxelib setup "$PWD/haxelib"
+          haxelib git heaps https://github.com/HeapsIO/heaps.git --quiet
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: box3d-web
+          path: build/samples-web
+
+      - name: Build the sample
+        run: |
+          set -eux
+          (cd samples && haxe sample_js.hxml)
+          cp samples/sample.html build/samples-web/index.html
+          ls -la build/samples-web
+
+      - uses: actions/configure-pages@v5
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: build/samples-web
+
+      - id: deploy
+        uses: actions/deploy-pages@v4
 
   # What `haxelib run hlbox3d install` downloads: the two builds of the
   # module for both systems and the web module, as loose files on the

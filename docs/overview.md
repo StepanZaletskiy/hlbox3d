@@ -20,6 +20,7 @@ both engines. The README has the installation and the first world.
 | Page | What it covers |
 | --- | --- |
 | [first_world.md](first_world.md) | the complete first program, line by line. |
+| [sample.md](sample.md) | the Driving sample: a forklift, crates, a recording and its replay, and what each file shows. |
 | [simulation.md](simulation.md) | the world, bodies and shapes, stepping, forces, sleep, events and joints. |
 | [collision.md](collision.md) | hulls, meshes, height fields and compounds; rays, casts and overlaps; collision without a world. |
 | [drawing.md](drawing.md) | what `attach` draws in Heaps, and how to draw a body yourself. |

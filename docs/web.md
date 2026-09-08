@@ -32,7 +32,9 @@ That is the whole difference. Worlds, bodies, joints, queries, events and
 browser has one thread.
 
 A page cannot fetch the wasm from `file://`; serve the directory over
-http, even for a local look.
+http, even for a local look. The Driving sample builds for the browser
+this way from the same files as for HashLink, `samples/sample_js.hxml`
+and `samples/sample.html`, see [sample.md](sample.md).
 
 ## What is the same and what is not
 

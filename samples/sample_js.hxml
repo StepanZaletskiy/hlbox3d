@@ -1,7 +1,6 @@
 -lib heaps
 -cp ../src
 -cp .
--D resourcesPath=data
 -main Main
 -js ../build/samples-web/sample.js
 -dce full

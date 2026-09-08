@@ -11,6 +11,14 @@
     <a href="https://hashlink.haxe.org" target="_blank">HashLink</a> and JS/WebGL
 </p>
 
+<p align="center">
+    <b>Try it now:</b> <a href="https://stepanzaletskiy.github.io/hlbox3d/" target="_blank">▶&nbsp; play the Driving sample in WebGL</a>
+</p>
+
+<p align="center">
+    <a href="https://stepanzaletskiy.github.io/hlbox3d/" target="_blank"><img width="80%" src="docs/images/driving.gif" alt="The Driving sample: a forklift on wheel joints, crates that report their hits, a recording played back"></a>
+</p>
+
 <br/>
 <p align="center">
     <a href="LICENSE" target="_blank">
@@ -104,13 +112,22 @@ from joints to queries to characters, starts at [docs/overview.md](docs/overview
 
 ## 🎮&nbsp; Sample
 
-[samples/Main.hx](samples/Main.hx) is Box3D's own character sample,
-Geometric Mover, walked by you: a capsule that climbs the stairs, slides
-along the walls and shoves the crates, on the level Box3D tests it on,
-with the torus, the height field, the sprung door, the falling tree and
-the gold box that drops through the start. WASD walks, Space jumps,
-Shift runs, T toggles the chase camera, R starts over. The same file
-builds to both targets.
+[samples/Main.hx](samples/Main.hx) is Box3D's own Driving sample, drawn
+the way its window draws it and driven by the same mouse: a box on four
+wheel joints over rolling ground, suspension, a motor at the back and
+steering at the front, a parallel joint keeping it upright, and the
+camera riding along. [Render.hx](samples/Render.hx) is its picture, the sun,
+the sky, the colours and the tone curve, and [Camera.hx](samples/Camera.hx)
+its camera, in its third person: W and S drive, A and D steer, the
+camera rides along and the mouse turns it, the wheel brings it in and
+out; Space is the handbrake, R starts over. A fork on the front, on a
+slider joint, rises with the left mouse button and lowers with the right.
+Crates round the map report their hits and count them; F records the
+world and V plays the
+recording back, drawn from the tape alone by [Replay.hx](samples/Replay.hx).
+The same files build to both targets, and the browser build is live at
+[stepanzaletskiy.github.io/hlbox3d](https://stepanzaletskiy.github.io/hlbox3d/),
+put there by CI from every push to main.
 
 HashLink:
 

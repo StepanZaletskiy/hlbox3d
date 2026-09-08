@@ -6,11 +6,15 @@ What changed in each release, newest first. The version is the one in
 
 ## Unreleased
 
-**The sample is Box3D's character sample.** `samples/Main.hx` is
-Geometric Mover walked by you: the capsule mover on the level Box3D
-tests it on, its two mesh files in `samples/data`, with the torus, the
-height field, the sprung door, the falling tree and the gold box. The
-pile of a hundred bodies it replaces was the least a sample could show.
+**The sample is Box3D's Driving, in Box3D's picture.** `samples/` is
+its wheel joint sample, a car on four wheel joints over rolling ground,
+in its third person, with its sun and sky, its state colours and its
+tone curve, so the two windows look alike. On top of Box3D's: a fork on
+a slider joint that makes the car a forklift, pallets to lift and crates
+to hit, which report their hits, and the run recorded on F and played
+back on V, drawn from the tape alone. One file a thing, `Main.hx` the
+loop on one screen; `docs/sample.md` walks through it. The pile of a
+hundred bodies it replaces was the least a sample could show.
 
 **Parity with Box3D's tests, measured.** CI builds Box3D's own test
 binary beside ours and compares the outputs subtest for subtest; the

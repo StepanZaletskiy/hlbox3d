@@ -110,8 +110,9 @@ static function main() {
 
 ## Where to go from here
 
-- [samples/Main.hx](../samples/Main.hx) is this with a hundred bodies and a
-  restart, the complete small program.
+- [sample.md](sample.md): the Driving sample, a forklift on wheel joints
+  with crates to hit and a recording played back, and what each file of
+  it shows.
 - [simulation.md](simulation.md): forces, sleep, events, joints, the rest
   of what a body is.
 - [collision.md](collision.md): hulls, meshes and height fields for a
@@ -121,4 +122,4 @@ static function main() {
 
 ---
 
-<sub>← [Overview](overview.md) · [Documentation](overview.md) · [Simulation](simulation.md) →</sub>
+<sub>← [Overview](overview.md) · [Documentation](overview.md) · [The sample](sample.md) →</sub>

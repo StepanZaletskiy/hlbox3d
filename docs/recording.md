@@ -43,6 +43,9 @@ trace(player.frame, player.frameCount, player.diverged);
 replayed world are readable through `body`, `shapeInfo`, `jointInfo`,
 `query` and the rest, and `triangles` gives the geometry to draw. A
 scrubber that shows any frame of a recording is built from these.
+[samples/Replay.hx](../samples/Replay.hx) is a complete drawer built on
+them, one mesh a body, that needs nothing of the live scene; the Driving
+sample plays its own recordings back with it, see [sample.md](sample.md).
 
 Keyframes make seeking fast: `setKeyframes` gives a memory budget and an
 interval, and a seek restarts from the nearest keyframe rather than from
