@@ -2,5 +2,6 @@
 -lib hlsdl
 -cp ../src
 -cp .
+-D resourcesPath=data
 -main Main
 -hl ../build/samples/sample.hl

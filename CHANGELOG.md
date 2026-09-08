@@ -4,6 +4,18 @@ What changed in each release, newest first. The version is the one in
 `haxelib.json` and the tag on GitHub; the Box3D commit is the one
 `CMakeLists.txt` pins.
 
+## Unreleased
+
+**The sample is Box3D's character sample.** `samples/Main.hx` is
+Geometric Mover walked by you: the capsule mover on the level Box3D
+tests it on, its two mesh files in `samples/data`, with the torus, the
+height field, the sprung door, the falling tree and the gold box. The
+pile of a hundred bodies it replaces was the least a sample could show.
+
+**Parity with Box3D's tests, measured.** CI builds Box3D's own test
+binary beside ours and compares the outputs subtest for subtest; the
+README badge says 223 of 256 and the build fails if that stops being so.
+
 ## 0.1.0 (2026-09-08)
 
 The first release. Box3D at

@@ -104,10 +104,13 @@ from joints to queries to characters, starts at [docs/overview.md](docs/overview
 
 ## 🎮&nbsp; Sample
 
-[samples/Main.hx](samples/Main.hx) is the complete program: a floor, a
-hundred spheres and boxes falling on it, an orbit camera, Space to start
-over, and the bodies still awake in the window title as the pile settles.
-The same file builds to both targets.
+[samples/Main.hx](samples/Main.hx) is Box3D's own character sample,
+Geometric Mover, walked by you: a capsule that climbs the stairs, slides
+along the walls and shoves the crates, on the level Box3D tests it on,
+with the torus, the height field, the sprung door, the falling tree and
+the gold box that drops through the start. WASD walks, Space jumps,
+Shift runs, T toggles the chase camera, R starts over. The same file
+builds to both targets.
 
 HashLink:
 
