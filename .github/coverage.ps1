@@ -41,6 +41,7 @@ $excused = [ordered]@{
 	'b3SetAllocator'             = 'an allocator is C, and nothing of ours may run on Box3D''s threads'
 	'b3InternalAssert'           = 'Box3D''s own way of reaching the assert handler; World.listen sets it'
 	'b3GetMillisecondsAndReset'  = 'World.ticks is the same clock, and a Haxe variable holds the reading'
+	'b3MakeBoxHull'              = 'b3MakeOffsetBoxHull with a zero offset is the same box; the shim has one path'
 }
 
 $exported = [ordered]@{}
