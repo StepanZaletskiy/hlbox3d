@@ -6,7 +6,7 @@
 	"description": "Box3D physics for Heaps — HashLink and JS/WebGL",
 	"version": "0.1.0",
 	"releasenote": "First release.",
-	"contributors": ["StepanZaletskii"],
+	"contributors": ["stepanzaletskii"],
 	"classPath": "src/",
 	"main": "Run",
 	"dependencies": {}
