@@ -154,6 +154,7 @@ is under Working on it below.
 - [docs/faq.md](docs/faq.md): the questions and the mistakes everyone makes once.
 - [docs/web.md](docs/web.md), [docs/large_worlds.md](docs/large_worlds.md), [docs/tests.md](docs/tests.md).
 - [docs/reference.md](docs/reference.md): every public member of every class, with its doc line.
+- [CHANGELOG.md](CHANGELOG.md): what changed in each release.
 
 
 ## 🛠️&nbsp; Working on it
