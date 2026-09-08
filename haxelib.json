@@ -1,6 +1,6 @@
 {
 	"name": "hlbox3d",
-	"url": "https://github.com/macaodev/hlbox3d",
+	"url": "https://github.com/StepanZaletskiy/hlbox3d",
 	"license": "MIT",
 	"tags": ["physics", "hashlink", "heaps", "box3d", "3d"],
 	"description": "Box3D rigid body physics for HashLink, Heaps and the web: bodies, shapes, joints, queries, events, meshes, height fields, a character mover and a ragdoll, with a fixed step and interpolated drawing.",

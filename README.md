@@ -14,16 +14,16 @@
 <br/>
 <p align="center">
     <a href="LICENSE" target="_blank">
-        <img src="https://img.shields.io/github/license/macaodev/hlbox3d.svg" alt="GitHub license">
+        <img src="https://img.shields.io/github/license/StepanZaletskiy/hlbox3d.svg" alt="GitHub license">
     </a>
-    <a href="https://github.com/macaodev/hlbox3d/releases" target="_blank">
-        <img src="https://img.shields.io/github/tag/macaodev/hlbox3d.svg" alt="GitHub tag (latest SemVer)">
+    <a href="https://github.com/StepanZaletskiy/hlbox3d/releases" target="_blank">
+        <img src="https://img.shields.io/github/tag/StepanZaletskiy/hlbox3d.svg" alt="GitHub tag (latest SemVer)">
     </a>
-    <a href="https://github.com/macaodev/hlbox3d/actions" target="_blank">
-        <img src="https://img.shields.io/github/actions/workflow/status/macaodev/hlbox3d/build.yml" alt="Build workflow status">
+    <a href="https://github.com/StepanZaletskiy/hlbox3d/actions" target="_blank">
+        <img src="https://img.shields.io/github/actions/workflow/status/StepanZaletskiy/hlbox3d/build.yml" alt="Build workflow status">
     </a>
-    <a href="https://github.com/macaodev/hlbox3d/commits" target="_blank">
-        <img src="https://img.shields.io/github/commit-activity/y/macaodev/hlbox3d.svg" alt="GitHub commit activity">
+    <a href="https://github.com/StepanZaletskiy/hlbox3d/commits" target="_blank">
+        <img src="https://img.shields.io/github/commit-activity/y/StepanZaletskiy/hlbox3d.svg" alt="GitHub commit activity">
     </a>
     <a href="https://lib.haxe.org/p/hlbox3d" target="_blank">
         <img src="https://img.shields.io/badge/haxelib-hlbox3d-orange.svg" alt="haxelib">
@@ -31,7 +31,7 @@
 </p>
 <br/>
 
-[hlbox3d](https://github.com/macaodev/hlbox3d) is [Box3D](https://github.com/erincatto/box3d), Erin Catto's **3D rigid body engine**, for Haxe. The solver is **Box3D itself**, compiled as it is into a native module for [HashLink](https://hashlink.haxe.org) and into wasm for the browser; the Haxe side, the `box3d` package, is **the same code on every target**. Bodies, shapes, joints, queries and events, meshes and height fields, a character mover and a ragdoll, recording and replay, with a **fixed step and interpolated drawing** for [Heaps](https://heaps.io).
+[hlbox3d](https://github.com/StepanZaletskiy/hlbox3d) is [Box3D](https://github.com/erincatto/box3d), Erin Catto's **3D rigid body engine**, for Haxe. The solver is **Box3D itself**, compiled as it is into a native module for [HashLink](https://hashlink.haxe.org) and into wasm for the browser; the Haxe side, the `box3d` package, is **the same code on every target**. Bodies, shapes, joints, queries and events, meshes and height fields, a character mover and a ragdoll, recording and replay, with a **fixed step and interpolated drawing** for [Heaps](https://heaps.io).
 
 This repository contains the **library**: the C shim, the Haxe package, a minimal sample and the ports of Box3D's unit tests.
 
@@ -54,7 +54,7 @@ Check with `hl` in a terminal. Skip this for a browser-only game.
 The Haxe side comes from git, the way Heaps does:
 
 ```
-haxelib git hlbox3d https://github.com/macaodev/hlbox3d
+haxelib git hlbox3d https://github.com/StepanZaletskiy/hlbox3d
 ```
 
 Or as a submodule of the game, with `-cp hlbox3d/src` instead of `-lib`.
@@ -167,7 +167,7 @@ same commands on Windows and Linux. Linux wants `build-essential cmake git`
 first, Windows a Visual Studio with C.
 
 ```
-git clone https://github.com/macaodev/hlbox3d
+git clone https://github.com/StepanZaletskiy/hlbox3d
 cd hlbox3d
 cmake -S . -B build && cmake --build build --config Release
 haxelib dev hlbox3d .
@@ -222,7 +222,7 @@ Box3D's own test run.
 
 ## 🤝&nbsp; Found a bug? Missing a feature?
 
-**File an issue** on [macaodev/hlbox3d](https://github.com/macaodev/hlbox3d/issues), with a recording if the world misbehaves: `world.record` writes one, and it replays exactly, see [docs/recording.md](docs/recording.md). If you already have the fix, **a pull request is welcome**; the shim follows Box3D's own style and the Haxe side follows Heaps', and `cmake --build build --target check` must stay green.
+**File an issue** on [StepanZaletskiy/hlbox3d](https://github.com/StepanZaletskiy/hlbox3d/issues), with a recording if the world misbehaves: `world.record` writes one, and it replays exactly, see [docs/recording.md](docs/recording.md). If you already have the fix, **a pull request is welcome**; the shim follows Box3D's own style and the Haxe side follows Heaps', and `cmake --build build --target check` must stay green.
 
 
 ## ✅&nbsp; Requirements

@@ -314,4 +314,4 @@ jobs:
           set -eux
           gh release create "$GITHUB_REF_NAME" assets/* \
             --title "$GITHUB_REF_NAME" \
-            --notes "Box3D for HashLink, Heaps and the web. Install with haxelib git hlbox3d https://github.com/macaodev/hlbox3d, then haxelib run hlbox3d install: it downloads the module here for your system. box3d-<system>.hdll has float positions, -large-world doubles; box3d.js and box3d.wasm are the same shim for the JavaScript target, haxelib run hlbox3d install --web <dir> fetches them."
+            --notes "Box3D for HashLink, Heaps and the web. Install with haxelib git hlbox3d https://github.com/StepanZaletskiy/hlbox3d, then haxelib run hlbox3d install: it downloads the module here for your system. box3d-<system>.hdll has float positions, -large-world doubles; box3d.js and box3d.wasm are the same shim for the JavaScript target, haxelib run hlbox3d install --web <dir> fetches them."

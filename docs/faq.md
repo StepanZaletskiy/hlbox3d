@@ -24,7 +24,7 @@ binding follows a fixed commit and updates deliberately.
 
 ## How do I get help?
 
-File an issue on [github.com/macaodev/hlbox3d](https://github.com/macaodev/hlbox3d/issues).
+File an issue on [github.com/StepanZaletskiy/hlbox3d](https://github.com/StepanZaletskiy/hlbox3d/issues).
 For the engine itself, its behaviour and its limits, Box3D's own
 [documentation](https://box3d.org) and the Box2D
 [publications](https://box2d.org/publications/) are the source; this
