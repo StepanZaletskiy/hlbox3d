@@ -71,6 +71,8 @@ class TestRollback {
 		// address, the same bodies made in the same order — and the snapshot put into that one. The same fall, to
 		// the bit: which is what a machine joining a game does with an image from another machine, whose regions
 		// sit at the same addresses by construction.
+		#if !js
+		// Not on the web: there a region is an ordinary allocation, at whatever address, and an image is its own world's only.
 		Main.subtest("TakenUpElsewhere");
 		final other = new World(256, 1);
 		final ground2 = other.add(Static, 0, 0, -0.5);
@@ -87,6 +89,7 @@ class TestRollback {
 		for( _ in 0...90 ) other.step(1 / 60);
 		Main.ensure(fingerprint(boxes2) == first);
 		other.dispose();
+		#end
 
 		// A snapshot from a region at another address is refused rather than put back as rubbish.
 		Main.subtest("RefusedElsewhere");

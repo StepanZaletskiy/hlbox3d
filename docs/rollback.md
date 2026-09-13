@@ -85,7 +85,8 @@ is kept through the restore and not taken from the image. A snapshot
 begins with the address of the region it came from, and a world at
 another address refuses it rather than take it up as rubbish. Where
 the fixed mapping is refused by the system, a region is an ordinary
-allocation, and only its own snapshots are put back into it.
+allocation, and only its own snapshots are put back into it; on the
+web that is always so.
 
 ## Reference
 
