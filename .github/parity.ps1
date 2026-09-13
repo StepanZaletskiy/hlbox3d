@@ -87,6 +87,13 @@ foreach ($t in $their.tests.Keys) { foreach ($s in $their.tests[$t]) { $theirPai
 $ourPairs = @{}
 foreach ($t in $our.tests.Keys) { foreach ($s in $our.tests[$t]) { $ourPairs["$t/$s"] = $true } }
 
+# Tests of ours that are no port of Box3D's, since what they test is the
+# shim's own. Listed by the name the runner prints; left out of the
+# port-for-port comparison, and counted in nothing.
+$ownTests = [ordered]@{
+	'RollbackTest' = 'TestRollback.hx: the snapshot is the shim''s, Box3D has none'
+}
+
 $problems = 0
 $ported = 0
 $excused = 0
@@ -115,11 +122,13 @@ foreach ($test in $their.tests.Keys) {
 	}
 }
 
-# Ours that theirs has not: test/ is ports only.
+# Ours that theirs has not: test/ is ports only, but for the shim's own.
 foreach ($pair in $ourPairs.Keys) {
+	if ($ownTests.Contains($pair.Split('/')[0])) { continue }
 	if ($theirPairs -notcontains $pair) { Write-Host "ours has it and Box3D does not: $pair" -ForegroundColor Red; $problems++ }
 }
 foreach ($test in $our.tests.Keys) {
+	if ($ownTests.Contains($test)) { continue }
 	if (-not $their.tests.Contains($test)) { Write-Host "ours has the test and Box3D does not: $test" -ForegroundColor Red; $problems++ }
 }
 

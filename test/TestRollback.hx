@@ -26,7 +26,7 @@ class TestRollback {
 	}
 
 	public static function run() {
-		Main.subtest("A world saved and put back");
+		Main.subtest("SaveAndRestore");
 		Main.ensure(World.arena());
 
 		final world = new World(256, 1);
