@@ -153,12 +153,40 @@ struct hb_arena_book {
 	size_t used;
 	size_t cap;
 	char *free[HB_ARENA_CLASSES];
+	int slot;
+	int fixed;
 };
 
+// A slot a region, NULL where free. A region's slot has the same address on every machine — the base below plus
+// the slot's number of regions — so that a world's image, its pointers absolute, can be taken up on another
+// machine: the worlds made in the same order sit in the same slots. Where the fixed mapping is refused, the
+// region is an ordinary allocation and an image from elsewhere is refused instead.
 static hb_arena_book *hb_regions[HB_REGIONS];
-static int hb_region_count = 0;
 static size_t hb_region_default = 0;
 static hb_arena_book *hb_current = NULL;
+#define HB_REGION_BASE ((size_t)0x400000000000)
+
+#if defined(_WIN32) && !defined(__EMSCRIPTEN__)
+__declspec(dllimport) void * __stdcall VirtualAlloc(void *address, size_t size, unsigned long type, unsigned long protect);
+__declspec(dllimport) int __stdcall VirtualFree(void *address, size_t size, unsigned long type);
+static void *hb_map_fixed(size_t at, size_t size) { return VirtualAlloc((void*)at, size, 0x1000 | 0x2000, 0x04); }
+static void hb_unmap(void *mem, size_t size) { (void)size; VirtualFree(mem, 0, 0x8000); }
+#elif !defined(__EMSCRIPTEN__)
+#include <sys/mman.h>
+#ifndef MAP_FIXED_NOREPLACE
+#define MAP_FIXED_NOREPLACE 0x100000
+#endif
+static void *hb_map_fixed(size_t at, size_t size) {
+	void *p = mmap((void*)at, size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED_NOREPLACE, -1, 0);
+	if( p == MAP_FAILED ) return NULL;
+	if( p != (void*)at ) { munmap(p, size); return NULL; }
+	return p;
+}
+static void hb_unmap(void *mem, size_t size) { munmap(mem, size); }
+#else
+static void *hb_map_fixed(size_t at, size_t size) { (void)at; (void)size; return NULL; }
+static void hb_unmap(void *mem, size_t size) { (void)mem; (void)size; }
+#endif
 
 #ifdef _MSC_VER
 #include <intrin.h>
@@ -178,9 +206,9 @@ static void hb_sys_aligned_free(void *mem) { free(mem); }
 // The region a piece of memory lies in, or NULL for none.
 static hb_arena_book *hb_region_of(const void *mem) {
 	int i;
-	for( i = 0; i < hb_region_count; i++ ) {
+	for( i = 0; i < HB_REGIONS; i++ ) {
 		const char *base = (const char*)hb_regions[i];
-		if( (const char*)mem >= base && (const char*)mem < base + hb_regions[i]->cap ) return hb_regions[i];
+		if( base != NULL && (const char*)mem >= base && (const char*)mem < base + hb_regions[i]->cap ) return hb_regions[i];
 	}
 	return NULL;
 }
@@ -279,25 +307,31 @@ static void *hb_mem_realloc(void *mem, size_t size) {
 static hb_arena_book *hb_region_make(void) {
 	hb_arena_book *a;
 	size_t book;
-	if( hb_region_default == 0 || hb_region_count >= HB_REGIONS ) return NULL;
-	a = (hb_arena_book*)hb_sys_aligned(hb_region_default);
-	if( a == NULL ) return NULL;
+	int slot = 0, fixed = 1;
+	if( hb_region_default == 0 ) return NULL;
+	while( slot < HB_REGIONS && hb_regions[slot] != NULL ) slot++;
+	if( slot >= HB_REGIONS ) return NULL;
+	a = (hb_arena_book*)hb_map_fixed(HB_REGION_BASE + (size_t)slot * hb_region_default, hb_region_default);
+	if( a == NULL ) {
+		fixed = 0;
+		a = (hb_arena_book*)hb_sys_aligned(hb_region_default);
+		if( a == NULL ) return NULL;
+	}
 	memset(a, 0, sizeof(hb_arena_book));
 	book = (sizeof(hb_arena_book) + 63) & ~(size_t)63;
 	a->used = book;
 	a->cap = hb_region_default;
-	hb_regions[hb_region_count++] = a;
+	a->slot = slot;
+	a->fixed = fixed;
+	hb_regions[slot] = a;
 	return a;
 }
 
 static void hb_region_drop(hb_arena_book *a) {
-	int i;
 	if( a == NULL ) return;
-	for( i = 0; i < hb_region_count; i++ ) if( hb_regions[i] == a ) {
-		hb_regions[i] = hb_regions[--hb_region_count];
-		break;
-	}
-	hb_sys_aligned_free(a);
+	if( a->slot >= 0 && a->slot < HB_REGIONS && hb_regions[a->slot] == a ) hb_regions[a->slot] = NULL;
+	if( a->fixed ) hb_unmap(a, a->cap);
+	else hb_sys_aligned_free(a);
 }
 
 // The world at hand: its region takes Box3D's allocations until another is named.
@@ -321,11 +355,15 @@ HL_PRIM bool HL_NAME(arena_init)(int bytes) {
 extern b3World b3_worlds[B3_MAX_WORLDS];
 #define HB_WORLD_SLOT(w) (&b3_worlds[(w)->id.index1 - 1])
 
+// A snapshot begins with the address of the region it was taken from, since every pointer in it is absolute: put
+// back into a region at another address it would be so much rubbish, and is refused.
+#define HB_IMAGE_HEAD sizeof(uint64_t)
+
 // Bytes a snapshot of the world is; nought for a world with no region.
 HL_PRIM int HL_NAME(world_snapshot_size)(hb_world *w) {
 	hb_use(w);
 	if( w == NULL || w->arena == NULL ) return 0;
-	return (int)(w->arena->used + sizeof(b3World) + sizeof(hb_world));
+	return (int)(HB_IMAGE_HEAD + w->arena->used + sizeof(b3World) + sizeof(hb_world));
 }
 
 // The world copied out: its region's used part, its slot in Box3D's array of worlds, and its struct here. Returns
@@ -335,12 +373,15 @@ HL_PRIM int HL_NAME(world_save)(hb_world *w, vbyte *dst, int cap) {
 	hb_use(w);
 	size_t used;
 	if( w == NULL || w->arena == NULL ) return -1;
+	uint64_t base = (uint64_t)(size_t)w->arena;
 	used = w->arena->used;
-	if( (size_t)cap < used + sizeof(b3World) + sizeof(hb_world) ) return -1;
+	if( (size_t)cap < HB_IMAGE_HEAD + used + sizeof(b3World) + sizeof(hb_world) ) return -1;
+	memcpy(dst, &base, HB_IMAGE_HEAD);
+	dst += HB_IMAGE_HEAD;
 	memcpy(dst, w->arena, used);
 	memcpy(dst + used, HB_WORLD_SLOT(w), sizeof(b3World));
 	memcpy(dst + used + sizeof(b3World), w, sizeof(hb_world));
-	return (int)(used + sizeof(b3World) + sizeof(hb_world));
+	return (int)(HB_IMAGE_HEAD + used + sizeof(b3World) + sizeof(hb_world));
 }
 
 // A snapshot put back: the region's first bytes as they were, books and all, the world's slot and its struct.
@@ -350,13 +391,41 @@ HL_PRIM bool HL_NAME(world_restore)(hb_world *w, vbyte *src, int len) {
 	hb_use(w);
 	size_t region;
 	hb_arena_book *arena;
-	if( w == NULL || w->arena == NULL || (size_t)len < sizeof(hb_arena_book) + sizeof(b3World) + sizeof(hb_world) ) return false;
-	region = (size_t)len - sizeof(b3World) - sizeof(hb_world);
+	uint64_t base;
+	b3World *slot, kept;
+	b3WorldId id;
+	if( w == NULL || w->arena == NULL || (size_t)len < HB_IMAGE_HEAD + sizeof(hb_arena_book) + sizeof(b3World) + sizeof(hb_world) ) return false;
+	memcpy(&base, src, HB_IMAGE_HEAD);
+	if( base != (uint64_t)(size_t)w->arena ) return false;
+	src += HB_IMAGE_HEAD;
+	region = (size_t)len - HB_IMAGE_HEAD - sizeof(b3World) - sizeof(hb_world);
 	if( region > w->arena->cap ) return false;
 	arena = w->arena;
+	slot = HB_WORLD_SLOT(w);
+	kept = *slot;
+	id = w->id;
 	memcpy(arena, src, region);
-	memcpy(HB_WORLD_SLOT(w), src + region, sizeof(b3World));
+	memcpy(slot, src + region, sizeof(b3World));
 	memcpy(w, src + region + sizeof(b3World), sizeof(hb_world));
+	// What is this machine's and this world's, not the image's: the world's name and generation, the task callbacks
+	// and their contexts — functions in this process, and this thread pool — and the other callbacks alike. An image
+	// from another machine, or another world here, would bring its own.
+	slot->worldId = kept.worldId;
+	slot->generation = kept.generation;
+	slot->enqueueTaskFcn = kept.enqueueTaskFcn;
+	slot->finishTaskFcn = kept.finishTaskFcn;
+	slot->userTaskContext = kept.userTaskContext;
+	slot->userTreeTask = kept.userTreeTask;
+	slot->preSolveFcn = kept.preSolveFcn;
+	slot->preSolveContext = kept.preSolveContext;
+	slot->customFilterFcn = kept.customFilterFcn;
+	slot->customFilterContext = kept.customFilterContext;
+	slot->frictionCallback = kept.frictionCallback;
+	slot->restitutionCallback = kept.restitutionCallback;
+	slot->createDebugShape = kept.createDebugShape;
+	slot->destroyDebugShape = kept.destroyDebugShape;
+	slot->userDebugShapeContext = kept.userDebugShapeContext;
+	w->id = id;
 	w->arena = arena;
 	hb_use(w);
 	return true;

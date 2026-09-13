@@ -66,5 +66,43 @@ class TestRollback {
 		Main.ensure(fingerprint(boxes) == first);
 
 		world.dispose();
+
+		// Taken up elsewhere: the world gone, another made in its place — the same slot, the same region at the same
+		// address, the same bodies made in the same order — and the snapshot put into that one. The same fall, to
+		// the bit: which is what a machine joining a game does with an image from another machine, whose regions
+		// sit at the same addresses by construction.
+		Main.subtest("TakenUpElsewhere");
+		final other = new World(256, 1);
+		final ground2 = other.add(Static, 0, 0, -0.5);
+		ground2.box(20, 20, 0.5);
+		final boxes2:Array<Body> = [];
+		for( i in 0...8 ) {
+			final b = other.add(Dynamic, 0.02 * i, 0, 0.5 + i * 1.0);
+			b.box(0.5, 0.5, 0.5);
+			b.massFromShapes();
+			boxes2.push(b);
+		}
+		Main.ensure(other.restore(snapshot, length));
+		Main.ensure(fingerprint(boxes2) == atSave);
+		for( _ in 0...90 ) other.step(1 / 60);
+		Main.ensure(fingerprint(boxes2) == first);
+		other.dispose();
+
+		// A snapshot from a region at another address is refused rather than put back as rubbish.
+		Main.subtest("RefusedElsewhere");
+		final one = new World(256, 1), two = new World(256, 1);
+		final b1 = one.add(Dynamic, 0, 0, 1);
+		b1.box(0.5, 0.5, 0.5);
+		b1.massFromShapes();
+		final b2 = two.add(Dynamic, 0, 0, 1);
+		b2.box(0.5, 0.5, 0.5);
+		b2.massFromShapes();
+		one.step(1 / 60);
+		final img = haxe.io.Bytes.alloc(one.snapshotSize() + 4096);
+		final n = one.save(img);
+		Main.ensure(n > 0);
+		Main.ensure(!two.restore(img, n));
+		one.dispose();
+		two.dispose();
 	}
 }

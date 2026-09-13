@@ -69,6 +69,24 @@ steps.
   megabytes at sixty-six a second, so keep as many as the rollback can
   reach back and no more.
 
+## Taken up elsewhere
+
+A snapshot can be put into a world on another machine, which is what
+a machine joining a game already going does with the image the others
+send it. The pointers inside are absolute, so the world there has to
+sit at the same address: every region is mapped at a fixed address —
+a base every machine shares plus its slot's number of regions — and
+the worlds made in the same order sit in the same slots. The world
+taking the image up has to have the same bodies, made in the same
+order, so that the Haxe side's names for them are the image's; and
+what is that machine's own — the world's name and generation, the
+task callbacks and the thread pool behind them, the other callbacks —
+is kept through the restore and not taken from the image. A snapshot
+begins with the address of the region it came from, and a world at
+another address refuses it rather than take it up as rubbish. Where
+the fixed mapping is refused by the system, a region is an ordinary
+allocation, and only its own snapshots are put back into it.
+
 ## Reference
 
 - `World.arena(bytes = 64 MB) : Bool` — a region of so many bytes for
