@@ -214,6 +214,58 @@ class World {
 		if( w == null ) throw "box3d: world_create failed";
 	}
 
+	// --- saving a world and putting it back ---
+
+	/**
+		Everything Box3D holds, in one region of memory from now on —
+		`bytes` of it, sixty-four megabytes if not said — so that the
+		worlds in it can be saved and put back whole: `save` and
+		`restore`. Before the first world is made; what was made before
+		lies outside the region. Once: a second call changes nothing.
+		The region does not grow, and a world that outgrows it stops.
+	**/
+	public static function arena( bytes = 64 * 1024 * 1024 ) : Bool {
+		if( !started ) {
+			if( !Native.init() ) throw "box3d: init failed";
+			started = true;
+		}
+		return Native.arena_init(bytes);
+	}
+
+	/** Bytes of the region in use: what a snapshot is. Nought without a region. **/
+	public static function arenaUsed() : Int return Native.arena_used();
+
+	/**
+		A snapshot of every world in the region: its used part, copied
+		into `into` — grown when short — and the length returned; -1
+		without a region. Between steps. Bodies, contacts, the solver's
+		warm starting, the id pools: all of it, bit for bit, so that a
+		world put back and stepped again does exactly what it did.
+	**/
+	public static function save( into : haxe.io.Bytes ) : Int {
+		var used = Native.arena_used();
+		if( used <= 0 ) return -1;
+		if( into.length < used ) throw "box3d: the snapshot wants " + used + " bytes, the buffer holds " + into.length;
+		return Native.arena_save(Buf.ofBytes(into), into.length);
+	}
+
+	/**
+		A snapshot put back — every world in the region as it was —
+		and this world's bodies read again, since what the Haxe side
+		keeps of them is of the moment before. Between steps. Bodies
+		made or removed since the snapshot are not put right: the ones
+		known here must be the ones known then.
+	**/
+	public function restore( image : haxe.io.Bytes, length : Int ) : Bool {
+		if( !Native.arena_restore(Buf.ofBytes(image), length) ) return false;
+		moved.resize(0);
+		for( body in bodies ) {
+			body.read();
+			body.warp();
+		}
+		return true;
+	}
+
 	/** Set the gravity vector. Usually in m/s^2. **/
 	public function setGravity( x : Float, y : Float, z : Float ) {
 		gx = x;

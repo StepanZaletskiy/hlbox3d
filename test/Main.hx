@@ -51,6 +51,7 @@ class Main {
 		test("RecordingTest", TestRecording.run);
 		test("ShapeTest", TestShape.run);
 		test("WorldTest", TestWorld.run);
+		test("RollbackTest", TestRollback.run);
 		report();
 	}
 

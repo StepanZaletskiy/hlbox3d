@@ -150,6 +150,7 @@ if(EMSCRIPTEN)
 # write files. SIMD flags match the ones Box3D sets for its own sources,
 # since its headers carry the SSE2 path the shim compiles too.
 add_executable(box3d_web src/box3d_hl.c)
+target_include_directories(box3d_web PRIVATE "${box3d_SOURCE_DIR}/src")
 set_target_properties(box3d_web PROPERTIES
 	OUTPUT_NAME "box3d"
 	SUFFIX ".js"
@@ -184,6 +185,9 @@ set_target_properties(box3d_hl PROPERTIES
 	LIBRARY_OUTPUT_DIRECTORY_MINSIZEREL "${CMAKE_BINARY_DIR}")
 
 target_include_directories(box3d_hl PRIVATE "${HL_INCLUDE}")
+# Box3D's own headers too: the worlds array is a global of its, and the
+# snapshot has to hold it — see the arena in the shim.
+target_include_directories(box3d_hl PRIVATE "${box3d_SOURCE_DIR}/src")
 
 if(HL_LIB STREQUAL "")
 	target_link_directories(box3d_hl PRIVATE "${HL_ROOT}")

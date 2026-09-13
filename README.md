@@ -172,6 +172,7 @@ is under Working on it below.
 - [docs/drawing.md](docs/drawing.md): what `attach` draws, and drawing a body yourself.
 - [docs/character.md](docs/character.md): the capsule mover and the ragdoll.
 - [docs/recording.md](docs/recording.md): recording a world and replaying it.
+- [docs/rollback.md](docs/rollback.md): saving a world whole and putting it back, for rollback networking.
 - [docs/loose_ends.md](docs/loose_ends.md): user data, coordinates, lifetimes, threads, Box3D's limits.
 - [docs/faq.md](docs/faq.md): the questions and the mistakes everyone makes once.
 - [docs/web.md](docs/web.md), [docs/large_worlds.md](docs/large_worlds.md), [docs/tests.md](docs/tests.md).

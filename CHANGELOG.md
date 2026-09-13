@@ -6,6 +6,15 @@ What changed in each release, newest first. The version is the one in
 
 ## Unreleased
 
+**A world saved whole and put back whole.** `World.arena` gives Box3D
+an allocator of its own over one region of memory, so that every byte
+it holds lies there; `World.save` copies the used part out, along with
+Box3D's array of worlds, and `world.restore` copies it back to the same
+addresses, books and pointers and all. A world put back and stepped
+again does exactly what it did — the footing of rollback networking.
+`docs/rollback.md`; a test that knocks a stack over, saves, runs on,
+puts back and runs on again to the same bits.
+
 **The sample is Box3D's Driving, in Box3D's picture.** `samples/` is
 its wheel joint sample, a car on four wheel joints over rolling ground,
 in its third person, with its sun and sky, its state colours and its

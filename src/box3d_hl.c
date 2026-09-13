@@ -21,6 +21,204 @@
 #include <string.h>
 #include <float.h>
 
+// ---- the arena: every byte of Box3D in one region, so that a world can be saved and put back whole ----
+//
+// Box3D takes an allocator. With one that hands out pieces of a single
+// region, the whole state of every world - bodies, contacts, the solver's
+// warm starting, the id pools, and the allocator's own books - lies between
+// the region's base and its used mark, and a copy of that is a snapshot.
+// Put back at the same addresses, every pointer inside is right again:
+// that is what a rollback is made of, and what Box3D on its own has no
+// way to give, since its state is spread over arrays it grows as it goes.
+//
+// Pieces come in power-of-two classes, each with a sixteen-byte head that
+// says the class and the size asked for, off a free list a class or off
+// the end of the used part. Freed pieces go back on their class's list -
+// the link is written where the head was - so a snapshot's books are the
+// books of that moment. The head keeps the payload sixteen-aligned, which
+// is what Box3D asks. A lock guards the books: Box3D allocates from its
+// tasks when an arena of the solver's overflows.
+//
+// The binding's own tables come from the same region when it is there, so
+// that the small numbers a Haxe body is known by roll back with the bodies.
+// What Box3D keeps outside - a byte count, the contact registry, the
+// timer - is statistics and setup, not state.
+//
+// One allocator for the process, hence one region for every world in it: a
+// snapshot is of them all. The region does not grow: Box3D asked for more
+// than it holds is an allocation that fails, and Box3D stops on that.
+// The one thing of a world's that is not in the region: Box3D keeps the worlds
+// themselves — the struct with every array's pointer and count, the id
+// pools' heads, the step's settings — in a global array. It goes into the
+// snapshot after the region, and back into place with it.
+#include "physics_world.h"
+extern b3World b3_worlds[B3_MAX_WORLDS];
+#define HB_WORLDS_BYTES (sizeof(b3_worlds))
+
+#define HB_ARENA_HEAD 16
+#define HB_ARENA_CLASSES 40
+#define HB_ARENA_FIRST_CLASS 5
+
+typedef struct {
+	size_t used;
+	size_t cap;
+	char *free[HB_ARENA_CLASSES];
+} hb_arena_book;
+
+static char *hb_arena_base = NULL;
+static hb_arena_book *hb_arena = NULL;
+
+#ifdef _MSC_VER
+#include <intrin.h>
+static volatile long hb_arena_lock = 0;
+static void hb_arena_take(void) { while( _InterlockedExchange(&hb_arena_lock, 1) != 0 ) { } }
+static void hb_arena_give(void) { _InterlockedExchange(&hb_arena_lock, 0); }
+#else
+static volatile int hb_arena_lock = 0;
+static void hb_arena_take(void) { while( __sync_lock_test_and_set(&hb_arena_lock, 1) != 0 ) { } }
+static void hb_arena_give(void) { __sync_lock_release(&hb_arena_lock); }
+#endif
+
+static int hb_arena_class(size_t size) {
+	size_t need = size + HB_ARENA_HEAD;
+	int c = HB_ARENA_FIRST_CLASS;
+	while( ((size_t)1 << c) < need && c < HB_ARENA_CLASSES - 1 ) c++;
+	return c;
+}
+
+static void *hb_arena_alloc(size_t size) {
+	int c;
+	size_t block;
+	char *p;
+	if( hb_arena == NULL ) return NULL;
+	c = hb_arena_class(size);
+	block = (size_t)1 << c;
+	hb_arena_take();
+	p = hb_arena->free[c];
+	if( p != NULL ) {
+		hb_arena->free[c] = *(char**)p;
+	} else if( hb_arena->used + block <= hb_arena->cap ) {
+		p = hb_arena_base + hb_arena->used;
+		hb_arena->used += block;
+	}
+	hb_arena_give();
+	if( p == NULL ) return NULL;
+	((int32_t*)p)[0] = c;
+	((int32_t*)p)[1] = 0;
+	((size_t*)p)[1] = size;
+	return p + HB_ARENA_HEAD;
+}
+
+static void hb_arena_free(void *mem) {
+	char *p;
+	int c;
+	if( mem == NULL || hb_arena == NULL ) return;
+	p = (char*)mem - HB_ARENA_HEAD;
+	c = ((int32_t*)p)[0];
+	hb_arena_take();
+	*(char**)p = hb_arena->free[c];
+	hb_arena->free[c] = p;
+	hb_arena_give();
+}
+
+static size_t hb_arena_size_of(void *mem) {
+	return mem == NULL ? 0 : ((size_t*)((char*)mem - HB_ARENA_HEAD))[1];
+}
+
+// Box3D's allocator callbacks. The alignment asked is sixteen, which the head gives.
+static void *hb_b3_alloc(int32_t size, int32_t alignment) {
+	(void)alignment;
+	return hb_arena_alloc((size_t)size);
+}
+
+static void hb_b3_free(void *mem) {
+	hb_arena_free(mem);
+}
+
+// The binding's own memory: the region when there is one, the C library otherwise.
+static void *hb_mem_alloc(size_t size) {
+	return hb_arena != NULL ? hb_arena_alloc(size) : malloc(size);
+}
+
+static void *hb_mem_realloc(void *mem, size_t size) {
+	void *grown;
+	size_t had;
+	if( hb_arena == NULL ) return realloc(mem, size);
+	grown = hb_arena_alloc(size);
+	if( grown == NULL ) return NULL;
+	had = hb_arena_size_of(mem);
+	if( mem != NULL ) {
+		memcpy(grown, mem, had < size ? had : size);
+		hb_arena_free(mem);
+	}
+	return grown;
+}
+
+static void hb_mem_free(void *mem) {
+	if( hb_arena != NULL ) hb_arena_free(mem);
+	else free(mem);
+}
+
+// The region made, of so many bytes, and Box3D pointed at it. Before any
+// world: what was allocated before lies outside and cannot be saved. Once;
+// a second call is true and does nothing.
+HL_PRIM bool HL_NAME(arena_init)(int bytes) {
+	size_t cap, book;
+	if( hb_arena != NULL ) return true;
+	if( bytes < 1 << 16 ) return false;
+	cap = (size_t)bytes;
+#ifdef _MSC_VER
+	hb_arena_base = (char*)_aligned_malloc(cap, 64);
+#else
+	hb_arena_base = (char*)aligned_alloc(64, (cap + 63) & ~(size_t)63);
+#endif
+	if( hb_arena_base == NULL ) return false;
+	memset(hb_arena_base, 0, sizeof(hb_arena_book));
+	hb_arena = (hb_arena_book*)hb_arena_base;
+	book = (sizeof(hb_arena_book) + 63) & ~(size_t)63;
+	hb_arena->used = book;
+	hb_arena->cap = cap;
+	b3SetAllocator(hb_b3_alloc, hb_b3_free);
+	return true;
+}
+
+// Bytes of the region in use - what a snapshot is; nought without a region.
+HL_PRIM int HL_NAME(arena_used)() {
+	return hb_arena == NULL ? 0 : (int)(hb_arena->used + HB_WORLDS_BYTES);
+}
+
+// The region's used part copied out. Returns the bytes copied, or -1 when
+// there is no region or `cap` is short. Between steps only: the copy is
+// of a moment, and a task writing meanwhile would leave a torn one.
+HL_PRIM int HL_NAME(arena_save)(vbyte *dst, int cap) {
+	size_t used;
+	if( hb_arena == NULL ) return -1;
+	used = hb_arena->used;
+	if( (size_t)cap < used + HB_WORLDS_BYTES ) return -1;
+	memcpy(dst, hb_arena_base, used);
+	memcpy(dst + used, b3_worlds, HB_WORLDS_BYTES);
+	return (int)(used + HB_WORLDS_BYTES);
+}
+
+// A snapshot put back: the region's first `len` bytes as they were, books
+// and all. What lies past `len` is what was allocated after the snapshot,
+// and the books put back know nothing of it, which is right. Between
+// steps only, and every body known on the Haxe side has to be read again.
+HL_PRIM bool HL_NAME(arena_restore)(vbyte *src, int len) {
+	size_t region;
+	if( hb_arena == NULL || (size_t)len < sizeof(hb_arena_book) + HB_WORLDS_BYTES ) return false;
+	region = (size_t)len - HB_WORLDS_BYTES;
+	if( region > hb_arena->cap ) return false;
+	memcpy(hb_arena_base, src, region);
+	memcpy(b3_worlds, src + region, HB_WORLDS_BYTES);
+	return true;
+}
+
+DEFINE_PRIM(_BOOL, arena_init, _I32);
+DEFINE_PRIM(_I32, arena_used, _NO_ARG);
+DEFINE_PRIM(_I32, arena_save, _BYTES _I32);
+DEFINE_PRIM(_BOOL, arena_restore, _BYTES _I32);
+
 #define _WORLD _ABSTRACT(hb_world)
 
 #define NO_SLOT (-1)
@@ -44,8 +242,8 @@ static void hb_table_init(hb_table *t) {
 }
 
 static void hb_table_free(hb_table *t) {
-	free(t->slots);
-	free(t->next);
+	hb_mem_free(t->slots);
+	hb_mem_free(t->next);
 	memset(t, 0, sizeof(*t));
 }
 
@@ -57,8 +255,8 @@ static int hb_keep(hb_table *t, uint64_t h) {
 	} else {
 		if( t->n == t->cap ) {
 			t->cap = t->cap == 0 ? 64 : t->cap * 2;
-			t->slots = (uint64_t*)realloc(t->slots, t->cap * sizeof(uint64_t));
-			t->next = (int*)realloc(t->next, t->cap * sizeof(int));
+			t->slots = (uint64_t*)hb_mem_realloc(t->slots, t->cap * sizeof(uint64_t));
+			t->next = (int*)hb_mem_realloc(t->next, t->cap * sizeof(int));
 		}
 		id = t->n++;
 	}
@@ -228,7 +426,7 @@ static void debug_shape_gone(void *userShape, void *context) {
 // capacity: 5 slots or NULL: static shapes, dynamic shapes, static bodies,
 // dynamic bodies, contacts. Zero keeps the Box3D default.
 HL_PRIM hb_world *HL_NAME(world_create)(int max_bodies, int threads, vbyte *capacity) {
-	hb_world *w = (hb_world*)malloc(sizeof(hb_world));
+	hb_world *w = (hb_world*)hb_mem_alloc(sizeof(hb_world));
 	if( w == NULL ) return NULL;
 	memset(w, 0, sizeof(hb_world));
 	hb_table_init(&w->bodies);
@@ -252,7 +450,7 @@ HL_PRIM hb_world *HL_NAME(world_create)(int max_bodies, int threads, vbyte *capa
 	}
 	w->id = b3CreateWorld(&def);
 	if( !b3World_IsValid(w->id) ) {
-		free(w);
+		hb_mem_free(w);
 		return NULL;
 	}
 	(void)max_bodies;
@@ -262,12 +460,12 @@ HL_PRIM hb_world *HL_NAME(world_create)(int max_bodies, int threads, vbyte *capa
 HL_PRIM void HL_NAME(world_destroy)(hb_world *w) {
 	if( w == NULL ) return;
 	b3DestroyWorld(w->id);
-	free(w->tags);
-	free(w->colors);
+	hb_mem_free(w->tags);
+	hb_mem_free(w->colors);
 	hb_table_free(&w->bodies);
 	hb_table_free(&w->shapes);
 	hb_table_free(&w->joints);
-	free(w);
+	hb_mem_free(w);
 }
 
 // ---- world ----
@@ -4220,7 +4418,7 @@ HL_PRIM void HL_NAME(shape_set_tag)(hb_world *w, int id, int tag) {
 	if( id >= w->tagCount ) {
 		int cap = w->tagCount == 0 ? 64 : w->tagCount;
 		while( cap <= id ) cap *= 2;
-		int *grown = (int*)realloc(w->tags, (size_t)cap * sizeof(int));
+		int *grown = (int*)hb_mem_realloc(w->tags, (size_t)cap * sizeof(int));
 		if( grown == NULL ) return;
 		memset(grown + w->tagCount, 0, (size_t)(cap - w->tagCount) * sizeof(int));
 		w->tags = grown;
@@ -4403,7 +4601,7 @@ static void col_shape(void *userShape, b3WorldTransform t, b3HexColor color, voi
 	if( body >= c->w->colorCap ) {
 		int cap = c->w->colorCap == 0 ? 256 : c->w->colorCap;
 		while( cap <= body ) cap *= 2;
-		c->w->colors = (uint32_t*)realloc(c->w->colors, (size_t)cap * sizeof(uint32_t));
+		c->w->colors = (uint32_t*)hb_mem_realloc(c->w->colors, (size_t)cap * sizeof(uint32_t));
 		memset(c->w->colors + c->w->colorCap, 0, (size_t)(cap - c->w->colorCap) * sizeof(uint32_t));
 		c->w->colorCap = cap;
 	}
