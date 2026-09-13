@@ -10,9 +10,10 @@ What changed in each release, newest first. The version is the one in
 addresses, the same on every machine, so that a world's image — its
 pointers absolute — can be put into a world on another machine, as a
 machine joining a game does; the image begins with its region's
-address and a world elsewhere refuses it, and what is the machine's
-own — the world's name, the task callbacks and their pool — is kept
-through the restore. `docs/rollback.md`, "Taken up elsewhere".
+address and the make of its build, and a world elsewhere or of
+another make refuses it; what is the machine's own — the world's
+name, the task callbacks and their pool — is kept through the
+restore. `docs/rollback.md`, "Taken up elsewhere".
 
 ## 0.1.0 (2026-09-13)
 

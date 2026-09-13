@@ -352,12 +352,27 @@ HL_PRIM bool HL_NAME(arena_init)(int bytes) {
 // The one thing of a world's that is not in its region: Box3D keeps the worlds themselves - the struct with every
 // array's pointer and count, the id pools' heads, the step's settings - in a global array.
 #include "physics_world.h"
+#include "body.h"
+#include "shape.h"
 extern b3World b3_worlds[B3_MAX_WORLDS];
 #define HB_WORLD_SLOT(w) (&b3_worlds[(w)->id.index1 - 1])
 
 // A snapshot begins with the address of the region it was taken from, since every pointer in it is absolute: put
-// back into a region at another address it would be so much rubbish, and is refused.
-#define HB_IMAGE_HEAD sizeof(uint64_t)
+// back into a region at another address it would be so much rubbish, and is refused. And with the make of the
+// build it came from — the system and the sizes of Box3D's structs — since a struct laid out otherwise by another
+// compiler reads as rubbish too: measured, a world from Linux steps on Windows and comes down on the first change
+// of a shape's filter. The same make, the same bits.
+#define HB_IMAGE_HEAD (2 * sizeof(uint64_t))
+#if defined(_WIN32)
+#define HB_MAKE_OS 1
+#elif defined(__EMSCRIPTEN__)
+#define HB_MAKE_OS 3
+#else
+#define HB_MAKE_OS 2
+#endif
+static uint64_t hb_image_make(void) {
+	return ((uint64_t)HB_MAKE_OS << 56) | ((uint64_t)sizeof(b3World) << 32) | ((uint64_t)sizeof(b3Shape) << 16) | (uint64_t)sizeof(b3Body);
+}
 
 // Bytes a snapshot of the world is; nought for a world with no region.
 HL_PRIM int HL_NAME(world_snapshot_size)(hb_world *w) {
@@ -373,10 +388,11 @@ HL_PRIM int HL_NAME(world_save)(hb_world *w, vbyte *dst, int cap) {
 	hb_use(w);
 	size_t used;
 	if( w == NULL || w->arena == NULL ) return -1;
-	uint64_t base = (uint64_t)(size_t)w->arena;
+	uint64_t base = (uint64_t)(size_t)w->arena, make = hb_image_make();
 	used = w->arena->used;
 	if( (size_t)cap < HB_IMAGE_HEAD + used + sizeof(b3World) + sizeof(hb_world) ) return -1;
-	memcpy(dst, &base, HB_IMAGE_HEAD);
+	memcpy(dst, &base, sizeof(uint64_t));
+	memcpy(dst + sizeof(uint64_t), &make, sizeof(uint64_t));
 	dst += HB_IMAGE_HEAD;
 	memcpy(dst, w->arena, used);
 	memcpy(dst + used, HB_WORLD_SLOT(w), sizeof(b3World));
@@ -391,12 +407,13 @@ HL_PRIM bool HL_NAME(world_restore)(hb_world *w, vbyte *src, int len) {
 	hb_use(w);
 	size_t region;
 	hb_arena_book *arena;
-	uint64_t base;
+	uint64_t base, make;
 	b3World *slot, kept;
 	b3WorldId id;
 	if( w == NULL || w->arena == NULL || (size_t)len < HB_IMAGE_HEAD + sizeof(hb_arena_book) + sizeof(b3World) + sizeof(hb_world) ) return false;
-	memcpy(&base, src, HB_IMAGE_HEAD);
-	if( base != (uint64_t)(size_t)w->arena ) return false;
+	memcpy(&base, src, sizeof(uint64_t));
+	memcpy(&make, src + sizeof(uint64_t), sizeof(uint64_t));
+	if( base != (uint64_t)(size_t)w->arena || make != hb_image_make() ) return false;
 	src += HB_IMAGE_HEAD;
 	region = (size_t)len - HB_IMAGE_HEAD - sizeof(b3World) - sizeof(hb_world);
 	if( region > w->arena->cap ) return false;

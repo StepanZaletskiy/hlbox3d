@@ -82,8 +82,12 @@ order, so that the Haxe side's names for them are the image's; and
 what is that machine's own — the world's name and generation, the
 task callbacks and the thread pool behind them, the other callbacks —
 is kept through the restore and not taken from the image. A snapshot
-begins with the address of the region it came from, and a world at
-another address refuses it rather than take it up as rubbish. Where
+begins with the address of the region it came from and the make of
+the build — the system and the sizes of Box3D's structs — and a world
+at another address, or of another make, refuses it rather than take it
+up as rubbish: a Linux world put into a Windows one steps, and comes
+down on the first change of a shape's filter, the compilers laying a
+struct out differently. Where
 the fixed mapping is refused by the system, a region is an ordinary
 allocation, and only its own snapshots are put back into it; on the
 web that is always so.
