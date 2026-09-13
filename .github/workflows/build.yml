@@ -384,7 +384,9 @@ jobs:
       # runner already, and a release is not the place to trust a third
       # party with a write token. A tag moved to a later commit finds its
       # release already made: then the assets are replaced and the release
-      # kept, so that the link in a runtime.lock stays good.
+      # kept, so that the link in a runtime.lock stays good. Deleting the
+      # old tag makes GitHub a draft of the release, and a draft is not
+      # found by tag from another repository: so it is published again.
       - name: Release
         env:
           GH_TOKEN: ${{ github.token }}
@@ -393,7 +395,7 @@ jobs:
           notes="Box3D for HashLink, Heaps and the web. Install with haxelib git hlbox3d https://github.com/StepanZaletskiy/hlbox3d, then haxelib run hlbox3d install: it downloads the module here for your system. box3d-<system>.hdll has float positions, -large-world doubles; box3d.js and box3d.wasm are the same shim for the JavaScript target, haxelib run hlbox3d install --web <dir> fetches them."
           if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
             gh release upload "$GITHUB_REF_NAME" assets/* --clobber
-            gh release edit "$GITHUB_REF_NAME" --target "$GITHUB_SHA" --notes "$notes"
+            gh release edit "$GITHUB_REF_NAME" --tag "$GITHUB_REF_NAME" --target "$GITHUB_SHA" --draft=false --notes "$notes"
           else
             gh release create "$GITHUB_REF_NAME" assets/* --title "$GITHUB_REF_NAME" --notes "$notes"
           fi
