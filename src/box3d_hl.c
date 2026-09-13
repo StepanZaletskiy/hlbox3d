@@ -469,6 +469,8 @@ DEFINE_PRIM(_BOOL, world_restore, _WORLD _BYTES _I32);
 
 static bool presolve_rule(b3ShapeId a, b3ShapeId b, b3Pos point, b3Vec3 normal, void *context);
 static bool filter_rule(b3ShapeId a, b3ShapeId b, void *context);
+static b3BodyId body_of(hb_world *w, int id);
+static b3ShapeId shape_of(hb_world *w, int id);
 
 static void hb_put_u32(vbyte **p, uint32_t v) { memcpy(*p, &v, 4); *p += 4; }
 static void hb_put_i32(vbyte **p, int32_t v) { memcpy(*p, &v, 4); *p += 4; }
@@ -608,6 +610,16 @@ HL_PRIM bool HL_NAME(world_adopt)(hb_world *w, vbyte *src, int len) {
 	if( !hb_table_take(&p, end, &w->bodies, w->id.index1 - 1) ) return false;
 	if( !hb_table_take(&p, end, &w->shapes, w->id.index1 - 1) ) return false;
 	if( !hb_table_take(&p, end, &w->joints, w->id.index1 - 1) ) return false;
+	// The binding's number of every body, shape and joint is kept in Box3D's user data — the way a hit names the
+	// body it hit — and the serializer writes user data out as nought: put back from the tables.
+	for( n = 0; n < w->bodies.n; n++ ) if( w->bodies.slots[n] != 0 ) b3Body_SetUserData(body_of(w, n), (void*)(intptr_t)(n + 1));
+	for( n = 0; n < w->shapes.n; n++ ) if( w->shapes.slots[n] != 0 ) b3Shape_SetUserData(shape_of(w, n), (void*)(intptr_t)(n + 1));
+	for( n = 0; n < w->joints.n; n++ ) if( w->joints.slots[n] != 0 ) {
+		b3JointId j;
+		uint64_t v = hb_get(&w->joints, n);
+		memcpy(&j, &v, sizeof(j));
+		b3Joint_SetUserData(j, (void*)(intptr_t)(n + 1));
+	}
 	if( end - p < 4 ) return false;
 	n = hb_take_i32(&p);
 	if( n < 0 || (size_t)(end - p) < (size_t)n * 4 + 4 + 4 + sizeof(b3Vec3) + sizeof(float) + 4 ) return false;
