@@ -38,7 +38,6 @@ $excused = [ordered]@{
 	'b3Contact_GetData'          = 'contact ids are not handed out; manifolds come from a body'
 	'b3Contact_IsValid'          = 'contact ids are not handed out; manifolds come from a body'
 	'b3World_DumpShapeBounds'    = 'declared in the header and not implemented in Box3D'
-	'b3SetAllocator'             = 'an allocator is C, and nothing of ours may run on Box3D''s threads'
 	'b3InternalAssert'           = 'Box3D''s own way of reaching the assert handler; World.listen sets it'
 	'b3GetMillisecondsAndReset'  = 'World.ticks is the same clock, and a Haxe variable holds the reading'
 	'b3MakeBoxHull'              = 'b3MakeOffsetBoxHull with a zero offset is the same box; the shim has one path'

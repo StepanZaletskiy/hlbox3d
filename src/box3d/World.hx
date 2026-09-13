@@ -248,7 +248,16 @@ class World {
 		var size = snapshotSize();
 		if( size <= 0 ) return -1;
 		if( into.length < size ) throw "box3d: the snapshot wants " + size + " bytes, the buffer holds " + into.length;
+		#if hl
 		return Native.world_save(w, Buf.ofBytes(into), into.length);
+		#else
+		// On the web a Buf is wasm memory of its own: the snapshot lands there and is copied out.
+		var buf = new Buf(size);
+		var got = Native.world_save(w, buf, size);
+		if( got > 0 ) into.blit(0, buf.toBytes(got), 0, got);
+		buf.free();
+		return got;
+		#end
 	}
 
 	/**
@@ -259,7 +268,14 @@ class World {
 		ones known then.
 	**/
 	public function restore( image : haxe.io.Bytes, length : Int ) : Bool {
-		if( !Native.world_restore(w, Buf.ofBytes(image), length) ) return false;
+		#if hl
+		var ok = Native.world_restore(w, Buf.ofBytes(image), length);
+		#else
+		var buf = Buf.ofBytes(image);
+		var ok = Native.world_restore(w, buf, length);
+		buf.free();
+		#end
+		if( !ok ) return false;
 		moved.resize(0);
 		for( body in bodies ) {
 			body.read();
