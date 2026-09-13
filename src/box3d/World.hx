@@ -280,6 +280,7 @@ class World {
 		for( body in bodies ) {
 			body.read();
 			body.warp();
+			moved.push(body);
 		}
 		return true;
 	}
@@ -331,10 +332,12 @@ class World {
 		buf.free();
 		#end
 		if( !ok ) return false;
+		// Every body is where the image says now, resting ones too, and whoever draws them by `moved` sees all of them.
 		moved.resize(0);
 		for( body in bodies ) {
 			body.read();
 			body.warp();
+			moved.push(body);
 		}
 		return true;
 	}
