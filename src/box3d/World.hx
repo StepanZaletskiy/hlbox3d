@@ -285,6 +285,60 @@ class World {
 	}
 
 
+	/**
+		The world as an image that crosses machines: Box3D's own
+		serialization of everything the simulation is — bodies, shapes,
+		contacts with their warm starting, islands, the solver's sets,
+		the trees, the id pools — with no pointer in it and the layout
+		of the structs hashed at its head, so that a build laid out
+		otherwise refuses it rather than misread it. Beside it the
+		binding's own names for the bodies and shapes, so that a Haxe
+		side that made the same bodies in the same order finds them by
+		the same numbers. Between steps.
+	**/
+	public function image() : haxe.io.Bytes {
+		var cap = 1 << 16;
+		while( true ) {
+			var into = haxe.io.Bytes.alloc(cap);
+			#if hl
+			var got = Native.world_image(w, Buf.ofBytes(into), cap);
+			#else
+			var buf = new Buf(cap);
+			var got = Native.world_image(w, buf, cap);
+			if( got > 0 ) into.blit(0, buf.toBytes(got), 0, got);
+			buf.free();
+			#end
+			if( got > 0 ) return into.sub(0, got);
+			if( got == -1 || got == 0 ) return null;
+			cap = -got + 1024;
+		}
+	}
+
+	/**
+		An image taken up: this world made again, empty, on its own
+		region, and the image put into it — the same simulation the
+		other machine had, to the bit, if it steps the same. The bodies
+		known here are read again; they have to be the ones the image
+		names, made in the same order, or given the image's numbers
+		first. False leaves an empty world: start over then.
+	**/
+	public function adopt( image : haxe.io.Bytes ) : Bool {
+		#if hl
+		var ok = Native.world_adopt(w, Buf.ofBytes(image), image.length);
+		#else
+		var buf = Buf.ofBytes(image);
+		var ok = Native.world_adopt(w, buf, image.length);
+		buf.free();
+		#end
+		if( !ok ) return false;
+		moved.resize(0);
+		for( body in bodies ) {
+			body.read();
+			body.warp();
+		}
+		return true;
+	}
+
 	/** Set the gravity vector. Usually in m/s^2. **/
 	public function setGravity( x : Float, y : Float, z : Float ) {
 		gx = x;

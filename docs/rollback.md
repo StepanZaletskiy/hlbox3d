@@ -92,6 +92,27 @@ the fixed mapping is refused by the system, a region is an ordinary
 allocation, and only its own snapshots are put back into it; on the
 web that is always so.
 
+## An image that crosses machines
+
+A snapshot is this machine's: pointers at this region's address,
+structs as this compiler laid them out. `world.image()` is the world
+as Box3D's own serializer writes it — every array of the simulation
+by value, geometry interned, nothing that points anywhere, the
+layout of the structs hashed at its head — with the binding's names
+for the bodies and shapes beside it; and `world.adopt(image)` makes
+this world again, empty, and puts the image into it. A world put
+together the same way elsewhere — the same bodies in the same order,
+or given the image's numbers first — then steps the same to the bit,
+Windows or Linux. A build whose structs are laid out otherwise
+refuses the image by its hash. Slower than a snapshot — a
+serialization, not a copy — and so for the moment somebody joins,
+not for every tick; a rollback snapshot of the world taken up works
+as ever.
+
+- `world.image() : haxe.io.Bytes` — the image, or null.
+- `world.adopt(image : haxe.io.Bytes) : Bool` — the image taken up;
+  false leaves the world empty, to be started over.
+
 ## Reference
 
 - `World.arena(bytes = 64 MB) : Bool` — a region of so many bytes for

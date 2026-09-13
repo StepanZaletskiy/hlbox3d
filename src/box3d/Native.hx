@@ -85,6 +85,16 @@ class Native {
 		return false;
 	}
 
+	/** The world as an image that crosses machines, into `dst` of `cap`: the bytes written, or minus the bytes wanted. **/
+	public static function world_image( w : WorldPtr, dst : Buf, cap : Int ) : Int {
+		return -1;
+	}
+
+	/** The image taken up: this world made again and the image put into it. **/
+	public static function world_adopt( w : WorldPtr, src : Buf, len : Int ) : Bool {
+		return false;
+	}
+
 	public static function world_set_gravity( w : WorldPtr, x : Float, y : Float, z : Float ) : Void {}
 
 	/** Three doubles out. **/

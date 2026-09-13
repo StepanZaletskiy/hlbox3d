@@ -91,6 +91,51 @@ class TestRollback {
 		other.dispose();
 		#end
 
+		// The image that crosses machines: Box3D's own serialization, taken up into a world made in its own slot
+		// and region, at another address — where a snapshot would be refused — and stepping the same to the bit.
+		Main.subtest("ImageAcrossWorlds");
+		final from = new World(256, 1);
+		final g3 = from.add(Static, 0, 0, -0.5);
+		g3.box(20, 20, 0.5);
+		final boxes3:Array<Body> = [];
+		for( i in 0...8 ) {
+			final b = from.add(Dynamic, 0.02 * i, 0, 0.5 + i * 1.0);
+			b.box(0.5, 0.5, 0.5);
+			b.massFromShapes();
+			boxes3.push(b);
+		}
+		boxes3[7].setVelocity(3, 1, 0);
+		for( _ in 0...30 ) from.step(1 / 60);
+		final image = from.image();
+		Main.ensure(image != null && image.length > 0);
+		final atImage = fingerprint(boxes3);
+		for( _ in 0...90 ) from.step(1 / 60);
+		final onward = fingerprint(boxes3);
+		final to = new World(256, 1);
+		final g4 = to.add(Static, 0, 0, -0.5);
+		g4.box(20, 20, 0.5);
+		final boxes4:Array<Body> = [];
+		for( i in 0...8 ) {
+			final b = to.add(Dynamic, 0.02 * i, 0, 0.5 + i * 1.0);
+			b.box(0.5, 0.5, 0.5);
+			b.massFromShapes();
+			boxes4.push(b);
+		}
+		Main.ensure(to.adopt(image));
+		Main.ensure(fingerprint(boxes4) == atImage);
+		for( _ in 0...90 ) to.step(1 / 60);
+		Main.ensure(fingerprint(boxes4) == onward);
+		// And a rollback snapshot of the world taken up works as ever: saved, stepped, put back, the same.
+		final snap2 = haxe.io.Bytes.alloc(to.snapshotSize() + 4096);
+		final len2 = to.save(snap2);
+		Main.ensure(len2 > 0);
+		final here = fingerprint(boxes4);
+		for( _ in 0...30 ) to.step(1 / 60);
+		Main.ensure(to.restore(snap2, len2));
+		Main.ensure(fingerprint(boxes4) == here);
+		from.dispose();
+		to.dispose();
+
 		// A snapshot from a region at another address is refused rather than put back as rubbish.
 		Main.subtest("RefusedElsewhere");
 		final one = new World(256, 1), two = new World(256, 1);

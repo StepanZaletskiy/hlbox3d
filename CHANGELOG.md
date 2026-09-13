@@ -6,6 +6,12 @@ What changed in each release, newest first. The version is the one in
 
 ## Unreleased
 
+**An image that crosses machines.** `world.image()` is the world as
+Box3D's own serializer writes it, no pointer in it and the structs'
+layout hashed, with the binding's names beside; `world.adopt(image)`
+makes the world again and puts it in. The same bits on Windows and
+Linux; a build laid out otherwise refuses it. `docs/rollback.md`.
+
 **A snapshot taken up elsewhere.** Regions are mapped at fixed
 addresses, the same on every machine, so that a world's image — its
 pointers absolute — can be put into a world on another machine, as a

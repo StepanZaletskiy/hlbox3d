@@ -108,6 +108,7 @@ typedef struct {
 	int colorCap;
 	// the region every byte of this world lies in, see the regions below; NULL with none
 	hb_arena_book *arena;
+	b3WorldDef def;
 } hb_world;
 
 // ---- regions: every byte of a world in one region of memory, so that the world can be saved and put back whole ----
@@ -453,6 +454,178 @@ DEFINE_PRIM(_I32, world_snapshot_size, _WORLD);
 DEFINE_PRIM(_I32, world_save, _WORLD _BYTES _I32);
 DEFINE_PRIM(_BOOL, world_restore, _WORLD _BYTES _I32);
 
+// ---- the world as an image that crosses machines ----
+//
+// Box3D's own serializer: every array of the simulation written out by value, geometry interned in a registry,
+// no pointer in it, and a hash of the structs' layout at its head that another build checks. Beside it the
+// binding's own: the tables of ids behind the small integers the Haxe side holds, the tags, the rules. Taken up
+// into a world made again, empty, on this world's region — the id of every body and shape as it was on the
+// machine it came from, with this world's number in it. What is the machine's own — the task pool, the
+// callbacks, the region — is this world's from before. A world of another build refuses the image by its hash.
+
+#include "world_snapshot.h"
+#include "recording.h"
+#include "recording_replay.h"
+
+static bool presolve_rule(b3ShapeId a, b3ShapeId b, b3Pos point, b3Vec3 normal, void *context);
+static bool filter_rule(b3ShapeId a, b3ShapeId b, void *context);
+
+static void hb_put_u32(vbyte **p, uint32_t v) { memcpy(*p, &v, 4); *p += 4; }
+static void hb_put_i32(vbyte **p, int32_t v) { memcpy(*p, &v, 4); *p += 4; }
+static uint32_t hb_take_u32(const vbyte **p) { uint32_t v; memcpy(&v, *p, 4); *p += 4; return v; }
+static int32_t hb_take_i32(const vbyte **p) { int32_t v; memcpy(&v, *p, 4); *p += 4; return v; }
+
+static size_t hb_table_bytes(const hb_table *t) { return 8 + (size_t)t->n * 12; }
+
+static void hb_table_put(vbyte **p, const hb_table *t) {
+	hb_put_i32(p, t->n);
+	hb_put_i32(p, t->freelist);
+	if( t->n > 0 ) {
+		memcpy(*p, t->slots, (size_t)t->n * 8); *p += (size_t)t->n * 8;
+		memcpy(*p, t->next, (size_t)t->n * 4); *p += (size_t)t->n * 4;
+	}
+}
+
+// The table read back, every id in it given this world's number: bytes 4 and 5 of a Box3D id are the world.
+static bool hb_table_take(const vbyte **p, const vbyte *end, hb_table *t, int world) {
+	int n, freelist, i;
+	uint16_t w0 = (uint16_t)world;
+	if( end - *p < 8 ) return false;
+	n = hb_take_i32(p);
+	freelist = hb_take_i32(p);
+	if( n < 0 || (size_t)(end - *p) < (size_t)n * 12 ) return false;
+	hb_table_free(t);
+	hb_table_init(t);
+	if( n > 0 ) {
+		t->cap = n;
+		t->n = n;
+		t->slots = (uint64_t*)hb_mem_alloc((size_t)n * 8);
+		t->next = (int*)hb_mem_alloc((size_t)n * 4);
+		memcpy(t->slots, *p, (size_t)n * 8); *p += (size_t)n * 8;
+		memcpy(t->next, *p, (size_t)n * 4); *p += (size_t)n * 4;
+		for( i = 0; i < n; i++ ) if( t->slots[i] != 0 ) memcpy((char*)&t->slots[i] + 4, &w0, 2);
+	}
+	t->freelist = freelist;
+	return true;
+}
+
+#define HB_IMAGE_MAGIC "KMB1"
+
+// The image into `dst`: the bytes written, or minus the bytes wanted when `cap` is short.
+HL_PRIM int HL_NAME(world_image)(hb_world *w, vbyte *dst, int cap) {
+	b3World *world;
+	b3Recording *rec;
+	b3RecBuffer buf;
+	size_t need;
+	vbyte *p;
+	hb_use(w);
+	if( w == NULL ) return -1;
+	world = b3GetWorldFromId(w->id);
+	rec = b3CreateRecording(1 << 16);
+	memset(&buf, 0, sizeof(buf));
+	b3SerializeWorld(world, &buf, rec);
+	b3RecWriteRegistry(rec);
+	need = 8 + 4 + (size_t)rec->buffer.size + 4 + (size_t)buf.size + hb_table_bytes(&w->bodies) + hb_table_bytes(&w->shapes) + hb_table_bytes(&w->joints)
+		+ 4 + (size_t)w->tagCount * 4 + 4 + 4 + sizeof(b3Vec3) + sizeof(float) + 4;
+	if( (size_t)cap < need ) {
+		b3RecBufFree(&buf);
+		b3DestroyRecording(rec);
+		return -(int)need;
+	}
+	p = dst;
+	memcpy(p, HB_IMAGE_MAGIC, 4); p += 4;
+	hb_put_u32(&p, (uint32_t)need);
+	hb_put_u32(&p, (uint32_t)rec->buffer.size);
+	memcpy(p, rec->buffer.data, (size_t)rec->buffer.size); p += rec->buffer.size;
+	hb_put_u32(&p, (uint32_t)buf.size);
+	memcpy(p, buf.data, (size_t)buf.size); p += buf.size;
+	hb_table_put(&p, &w->bodies);
+	hb_table_put(&p, &w->shapes);
+	hb_table_put(&p, &w->joints);
+	hb_put_i32(&p, w->tagCount);
+	if( w->tagCount > 0 ) { memcpy(p, w->tags, (size_t)w->tagCount * 4); p += (size_t)w->tagCount * 4; }
+	hb_put_i32(&p, w->speculativeOff);
+	hb_put_i32(&p, w->presolveRule);
+	memcpy(p, &w->presolveDir, sizeof(b3Vec3)); p += sizeof(b3Vec3);
+	memcpy(p, &w->presolveThreshold, sizeof(float)); p += sizeof(float);
+	hb_put_i32(&p, w->filterRule);
+	b3RecBufFree(&buf);
+	b3DestroyRecording(rec);
+	return (int)(p - dst);
+}
+
+// The image taken up: this world made again, empty, and the image put into it. False, with the world left
+// empty, when the image is not one, is of another build, or is short: the caller starts over.
+HL_PRIM bool HL_NAME(world_adopt)(hb_world *w, vbyte *src, int len) {
+	const vbyte *p = src, *end = src + len;
+	uint32_t total, regLen, worldLen, count, i;
+	b3RecReader rdr;
+	b3World *world;
+	int n;
+	hb_use(w);
+	if( w == NULL || len < 12 || memcmp(src, HB_IMAGE_MAGIC, 4) != 0 ) return false;
+	p += 4;
+	total = hb_take_u32(&p);
+	if( total != (uint32_t)len ) return false;
+	regLen = hb_take_u32(&p);
+	if( (size_t)(end - p) < regLen + 4 ) return false;
+	memset(&rdr, 0, sizeof(rdr));
+	rdr.ok = true;
+	{
+		const vbyte *rp = p, *rend = p + regLen;
+		if( regLen < 4 ) return false;
+		count = hb_take_u32(&rp);
+		if( count > 0 ) {
+			if( (size_t)count > (size_t)(rend - rp) / 5 ) return false;
+			rdr.slots = (b3RegistrySlot*)b3Alloc(count * sizeof(b3RegistrySlot));
+			memset(rdr.slots, 0, count * sizeof(b3RegistrySlot));
+			for( i = 0; i < count; i++ ) {
+				uint32_t bc;
+				if( rend - rp < 5 ) return false;
+				rdr.slots[i].kind = (b3GeometryKind)*rp++;
+				bc = hb_take_u32(&rp);
+				if( (size_t)(rend - rp) < bc ) return false;
+				rdr.slots[i].byteCount = (int)bc;
+				rdr.slots[i].bytes = (uint8_t*)b3Alloc(bc > 0 ? bc : 1);
+				if( bc > 0 ) memcpy(rdr.slots[i].bytes, rp, bc);
+				rp += bc;
+			}
+			rdr.slotCount = (int)count;
+		}
+	}
+	p += regLen;
+	worldLen = hb_take_u32(&p);
+	if( (size_t)(end - p) < worldLen ) return false;
+	// The shell: this world made again, empty, on its region, with its callbacks.
+	b3DestroyWorld(w->id);
+	w->id = b3CreateWorld(&w->def);
+	if( !b3World_IsValid(w->id) ) return false;
+	b3World_SetPreSolveCallback(w->id, presolve_rule, w);
+	b3World_SetCustomFilterCallback(w->id, filter_rule, w);
+	world = b3GetWorldFromId(w->id);
+	if( !b3DeserializeIntoShell(p, (int)worldLen, world, &rdr) ) return false;
+	p += worldLen;
+	if( !hb_table_take(&p, end, &w->bodies, w->id.index1 - 1) ) return false;
+	if( !hb_table_take(&p, end, &w->shapes, w->id.index1 - 1) ) return false;
+	if( !hb_table_take(&p, end, &w->joints, w->id.index1 - 1) ) return false;
+	if( end - p < 4 ) return false;
+	n = hb_take_i32(&p);
+	if( n < 0 || (size_t)(end - p) < (size_t)n * 4 + 4 + 4 + sizeof(b3Vec3) + sizeof(float) + 4 ) return false;
+	hb_mem_free(w->tags);
+	w->tags = n > 0 ? (int*)hb_mem_alloc((size_t)n * 4) : NULL;
+	if( n > 0 ) { memcpy(w->tags, p, (size_t)n * 4); p += (size_t)n * 4; }
+	w->tagCount = n;
+	w->speculativeOff = hb_take_i32(&p);
+	w->presolveRule = hb_take_i32(&p);
+	memcpy(&w->presolveDir, p, sizeof(b3Vec3)); p += sizeof(b3Vec3);
+	memcpy(&w->presolveThreshold, p, sizeof(float)); p += sizeof(float);
+	w->filterRule = hb_take_i32(&p);
+	return true;
+}
+
+DEFINE_PRIM(_I32, world_image, _WORLD _BYTES _I32);
+DEFINE_PRIM(_BOOL, world_adopt, _WORLD _BYTES _I32);
+
 // A zero word is the null id: a live id never has index1 == 0.
 static uint64_t pack_body(b3BodyId b) { uint64_t v = 0; memcpy(&v, &b, sizeof(b)); return v; }
 static uint64_t pack_shape(b3ShapeId s) { uint64_t v = 0; memcpy(&v, &s, sizeof(s)); return v; }
@@ -605,6 +778,7 @@ HL_PRIM hb_world *HL_NAME(world_create)(int max_bodies, int threads, vbyte *capa
 		if( (int)ff(capacity, 3) > 0 ) def.capacity.dynamicBodyCount = (int)ff(capacity, 3);
 		if( (int)ff(capacity, 4) > 0 ) def.capacity.contactCount = (int)ff(capacity, 4);
 	}
+	w->def = def;
 	w->id = b3CreateWorld(&def);
 	if( !b3World_IsValid(w->id) ) {
 		hb_use(NULL);
