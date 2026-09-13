@@ -8,9 +8,8 @@ import box3d.Body;
 // the contacts and the warm starting along with the bodies. And the bodies
 // right after the restore have to be where they were at the snapshot.
 //
-// The region is the process's: this test makes its own world in it beside
-// whatever the others left, and the snapshot holds all of it; the others'
-// worlds are gone by then, so nothing is put back under anybody's feet.
+// A region is a world's own: the snapshot is of this world alone, whatever
+// other worlds the tests keep.
 class TestRollback {
 
 	static function fingerprint(bodies:Array<Body>):String {
@@ -29,9 +28,9 @@ class TestRollback {
 	public static function run() {
 		Main.subtest("A world saved and put back");
 		Main.ensure(World.arena());
-		Main.ensure(World.arenaUsed() > 0);
 
 		final world = new World(256, 1);
+		Main.ensure(world.snapshotSize() > 0);
 		final ground = world.add(Static, 0, 0, -0.5);
 		ground.box(20, 20, 0.5);
 		final boxes:Array<Body> = [];
@@ -45,8 +44,8 @@ class TestRollback {
 		boxes[7].setVelocity(3, 1, 0);
 		for( _ in 0...30 ) world.step(1 / 60);
 
-		final snapshot = haxe.io.Bytes.alloc(World.arenaUsed() + 4096);
-		final length = World.save(snapshot);
+		final snapshot = haxe.io.Bytes.alloc(world.snapshotSize() + 4096);
+		final length = world.save(snapshot);
 		Main.ensure(length > 0);
 		final atSave = fingerprint(boxes);
 

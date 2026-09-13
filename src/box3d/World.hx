@@ -217,12 +217,13 @@ class World {
 	// --- saving a world and putting it back ---
 
 	/**
-		Everything Box3D holds, in one region of memory from now on —
-		`bytes` of it, sixty-four megabytes if not said — so that the
-		worlds in it can be saved and put back whole: `save` and
-		`restore`. Before the first world is made; what was made before
-		lies outside the region. Once: a second call changes nothing.
-		The region does not grow, and a world that outgrows it stops.
+		A region of memory of so many bytes for every world made from
+		now on — sixty-four megabytes if not said — with every byte of
+		the world in it, so that the world can be saved and put back
+		whole: `save` and `restore`. Before the worlds that are to be
+		saved; a world made before has no region. Once: a second call
+		changes nothing. A region does not grow, and a world that
+		outgrows it stops.
 	**/
 	public static function arena( bytes = 64 * 1024 * 1024 ) : Bool {
 		if( !started ) {
@@ -232,32 +233,33 @@ class World {
 		return Native.arena_init(bytes);
 	}
 
-	/** Bytes of the region in use: what a snapshot is. Nought without a region. **/
-	public static function arenaUsed() : Int return Native.arena_used();
+	/** Bytes a snapshot of this world is now; nought for a world with no region. **/
+	public function snapshotSize() : Int return Native.world_snapshot_size(w);
 
 	/**
-		A snapshot of every world in the region: its used part, copied
-		into `into` — grown when short — and the length returned; -1
-		without a region. Between steps. Bodies, contacts, the solver's
-		warm starting, the id pools: all of it, bit for bit, so that a
-		world put back and stepped again does exactly what it did.
+		A snapshot of this world: its region's used part and what Box3D
+		keeps of it beside, copied into `into` — which has to hold
+		`snapshotSize` — and the length returned; -1 without a region.
+		Between steps. Bodies, contacts, the solver's warm starting, the
+		id pools: all of it, bit for bit, so that a world put back and
+		stepped again does exactly what it did.
 	**/
-	public static function save( into : haxe.io.Bytes ) : Int {
-		var used = Native.arena_used();
-		if( used <= 0 ) return -1;
-		if( into.length < used ) throw "box3d: the snapshot wants " + used + " bytes, the buffer holds " + into.length;
-		return Native.arena_save(Buf.ofBytes(into), into.length);
+	public function save( into : haxe.io.Bytes ) : Int {
+		var size = snapshotSize();
+		if( size <= 0 ) return -1;
+		if( into.length < size ) throw "box3d: the snapshot wants " + size + " bytes, the buffer holds " + into.length;
+		return Native.world_save(w, Buf.ofBytes(into), into.length);
 	}
 
 	/**
-		A snapshot put back — every world in the region as it was —
-		and this world's bodies read again, since what the Haxe side
-		keeps of them is of the moment before. Between steps. Bodies
-		made or removed since the snapshot are not put right: the ones
-		known here must be the ones known then.
+		A snapshot put back — this world as it was — and its bodies
+		read again, since what the Haxe side keeps of them is of the
+		moment before. Between steps. Bodies made or removed since the
+		snapshot are not put right: the ones known here must be the
+		ones known then.
 	**/
 	public function restore( image : haxe.io.Bytes, length : Int ) : Bool {
-		if( !Native.arena_restore(Buf.ofBytes(image), length) ) return false;
+		if( !Native.world_restore(w, Buf.ofBytes(image), length) ) return false;
 		moved.resize(0);
 		for( body in bodies ) {
 			body.read();
@@ -265,6 +267,7 @@ class World {
 		}
 		return true;
 	}
+
 
 	/** Set the gravity vector. Usually in m/s^2. **/
 	public function setGravity( x : Float, y : Float, z : Float ) {

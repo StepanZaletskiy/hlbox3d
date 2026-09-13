@@ -65,23 +65,23 @@ class Native {
 		return 0;
 	}
 
-	/** Every byte of Box3D in one region of so many bytes from now on, for `arena_save` and `arena_restore`; before any world. **/
+	/** A region of so many bytes for every world made from now on, for `world_save` and `world_restore`. **/
 	public static function arena_init( bytes : Int ) : Bool {
 		return false;
 	}
 
-	/** Bytes of the region in use: the size of a snapshot. **/
-	public static function arena_used() : Int {
+	/** Bytes a snapshot of the world is; nought for a world with no region. **/
+	public static function world_snapshot_size( w : WorldPtr ) : Int {
 		return 0;
 	}
 
-	/** The region's used part into `dst`, which holds `cap`; the bytes copied, or -1. **/
-	public static function arena_save( dst : Buf, cap : Int ) : Int {
+	/** The world copied out into `dst`, which holds `cap`; the bytes copied, or -1. **/
+	public static function world_save( w : WorldPtr, dst : Buf, cap : Int ) : Int {
 		return -1;
 	}
 
-	/** The region's first `len` bytes as `src` has them. **/
-	public static function arena_restore( src : Buf, len : Int ) : Bool {
+	/** The world put back from the first `len` bytes of `src`. **/
+	public static function world_restore( w : WorldPtr, src : Buf, len : Int ) : Bool {
 		return false;
 	}
 

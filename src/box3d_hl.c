@@ -21,203 +21,11 @@
 #include <string.h>
 #include <float.h>
 
-// ---- the arena: every byte of Box3D in one region, so that a world can be saved and put back whole ----
-//
-// Box3D takes an allocator. With one that hands out pieces of a single
-// region, the whole state of every world - bodies, contacts, the solver's
-// warm starting, the id pools, and the allocator's own books - lies between
-// the region's base and its used mark, and a copy of that is a snapshot.
-// Put back at the same addresses, every pointer inside is right again:
-// that is what a rollback is made of, and what Box3D on its own has no
-// way to give, since its state is spread over arrays it grows as it goes.
-//
-// Pieces come in power-of-two classes, each with a sixteen-byte head that
-// says the class and the size asked for, off a free list a class or off
-// the end of the used part. Freed pieces go back on their class's list -
-// the link is written where the head was - so a snapshot's books are the
-// books of that moment. The head keeps the payload sixteen-aligned, which
-// is what Box3D asks. A lock guards the books: Box3D allocates from its
-// tasks when an arena of the solver's overflows.
-//
-// The binding's own tables come from the same region when it is there, so
-// that the small numbers a Haxe body is known by roll back with the bodies.
-// What Box3D keeps outside - a byte count, the contact registry, the
-// timer - is statistics and setup, not state.
-//
-// One allocator for the process, hence one region for every world in it: a
-// snapshot is of them all. The region does not grow: Box3D asked for more
-// than it holds is an allocation that fails, and Box3D stops on that.
-// The one thing of a world's that is not in the region: Box3D keeps the worlds
-// themselves — the struct with every array's pointer and count, the id
-// pools' heads, the step's settings — in a global array. It goes into the
-// snapshot after the region, and back into place with it.
-#include "physics_world.h"
-extern b3World b3_worlds[B3_MAX_WORLDS];
-#define HB_WORLDS_BYTES (sizeof(b3_worlds))
 
-#define HB_ARENA_HEAD 16
-#define HB_ARENA_CLASSES 40
-#define HB_ARENA_FIRST_CLASS 5
-
-typedef struct {
-	size_t used;
-	size_t cap;
-	char *free[HB_ARENA_CLASSES];
-} hb_arena_book;
-
-static char *hb_arena_base = NULL;
-static hb_arena_book *hb_arena = NULL;
-
-#ifdef _MSC_VER
-#include <intrin.h>
-static volatile long hb_arena_lock = 0;
-static void hb_arena_take(void) { while( _InterlockedExchange(&hb_arena_lock, 1) != 0 ) { } }
-static void hb_arena_give(void) { _InterlockedExchange(&hb_arena_lock, 0); }
-#else
-static volatile int hb_arena_lock = 0;
-static void hb_arena_take(void) { while( __sync_lock_test_and_set(&hb_arena_lock, 1) != 0 ) { } }
-static void hb_arena_give(void) { __sync_lock_release(&hb_arena_lock); }
-#endif
-
-static int hb_arena_class(size_t size) {
-	size_t need = size + HB_ARENA_HEAD;
-	int c = HB_ARENA_FIRST_CLASS;
-	while( ((size_t)1 << c) < need && c < HB_ARENA_CLASSES - 1 ) c++;
-	return c;
-}
-
-static void *hb_arena_alloc(size_t size) {
-	int c;
-	size_t block;
-	char *p;
-	if( hb_arena == NULL ) return NULL;
-	c = hb_arena_class(size);
-	block = (size_t)1 << c;
-	hb_arena_take();
-	p = hb_arena->free[c];
-	if( p != NULL ) {
-		hb_arena->free[c] = *(char**)p;
-	} else if( hb_arena->used + block <= hb_arena->cap ) {
-		p = hb_arena_base + hb_arena->used;
-		hb_arena->used += block;
-	}
-	hb_arena_give();
-	if( p == NULL ) return NULL;
-	((int32_t*)p)[0] = c;
-	((int32_t*)p)[1] = 0;
-	((size_t*)p)[1] = size;
-	return p + HB_ARENA_HEAD;
-}
-
-static void hb_arena_free(void *mem) {
-	char *p;
-	int c;
-	if( mem == NULL || hb_arena == NULL ) return;
-	p = (char*)mem - HB_ARENA_HEAD;
-	c = ((int32_t*)p)[0];
-	hb_arena_take();
-	*(char**)p = hb_arena->free[c];
-	hb_arena->free[c] = p;
-	hb_arena_give();
-}
-
-static size_t hb_arena_size_of(void *mem) {
-	return mem == NULL ? 0 : ((size_t*)((char*)mem - HB_ARENA_HEAD))[1];
-}
-
-// Box3D's allocator callbacks. The alignment asked is sixteen, which the head gives.
-static void *hb_b3_alloc(int32_t size, int32_t alignment) {
-	(void)alignment;
-	return hb_arena_alloc((size_t)size);
-}
-
-static void hb_b3_free(void *mem) {
-	hb_arena_free(mem);
-}
-
-// The binding's own memory: the region when there is one, the C library otherwise.
-static void *hb_mem_alloc(size_t size) {
-	return hb_arena != NULL ? hb_arena_alloc(size) : malloc(size);
-}
-
-static void *hb_mem_realloc(void *mem, size_t size) {
-	void *grown;
-	size_t had;
-	if( hb_arena == NULL ) return realloc(mem, size);
-	grown = hb_arena_alloc(size);
-	if( grown == NULL ) return NULL;
-	had = hb_arena_size_of(mem);
-	if( mem != NULL ) {
-		memcpy(grown, mem, had < size ? had : size);
-		hb_arena_free(mem);
-	}
-	return grown;
-}
-
-static void hb_mem_free(void *mem) {
-	if( hb_arena != NULL ) hb_arena_free(mem);
-	else free(mem);
-}
-
-// The region made, of so many bytes, and Box3D pointed at it. Before any
-// world: what was allocated before lies outside and cannot be saved. Once;
-// a second call is true and does nothing.
-HL_PRIM bool HL_NAME(arena_init)(int bytes) {
-	size_t cap, book;
-	if( hb_arena != NULL ) return true;
-	if( bytes < 1 << 16 ) return false;
-	cap = (size_t)bytes;
-#ifdef _MSC_VER
-	hb_arena_base = (char*)_aligned_malloc(cap, 64);
-#else
-	hb_arena_base = (char*)aligned_alloc(64, (cap + 63) & ~(size_t)63);
-#endif
-	if( hb_arena_base == NULL ) return false;
-	memset(hb_arena_base, 0, sizeof(hb_arena_book));
-	hb_arena = (hb_arena_book*)hb_arena_base;
-	book = (sizeof(hb_arena_book) + 63) & ~(size_t)63;
-	hb_arena->used = book;
-	hb_arena->cap = cap;
-	b3SetAllocator(hb_b3_alloc, hb_b3_free);
-	return true;
-}
-
-// Bytes of the region in use - what a snapshot is; nought without a region.
-HL_PRIM int HL_NAME(arena_used)() {
-	return hb_arena == NULL ? 0 : (int)(hb_arena->used + HB_WORLDS_BYTES);
-}
-
-// The region's used part copied out. Returns the bytes copied, or -1 when
-// there is no region or `cap` is short. Between steps only: the copy is
-// of a moment, and a task writing meanwhile would leave a torn one.
-HL_PRIM int HL_NAME(arena_save)(vbyte *dst, int cap) {
-	size_t used;
-	if( hb_arena == NULL ) return -1;
-	used = hb_arena->used;
-	if( (size_t)cap < used + HB_WORLDS_BYTES ) return -1;
-	memcpy(dst, hb_arena_base, used);
-	memcpy(dst + used, b3_worlds, HB_WORLDS_BYTES);
-	return (int)(used + HB_WORLDS_BYTES);
-}
-
-// A snapshot put back: the region's first `len` bytes as they were, books
-// and all. What lies past `len` is what was allocated after the snapshot,
-// and the books put back know nothing of it, which is right. Between
-// steps only, and every body known on the Haxe side has to be read again.
-HL_PRIM bool HL_NAME(arena_restore)(vbyte *src, int len) {
-	size_t region;
-	if( hb_arena == NULL || (size_t)len < sizeof(hb_arena_book) + HB_WORLDS_BYTES ) return false;
-	region = (size_t)len - HB_WORLDS_BYTES;
-	if( region > hb_arena->cap ) return false;
-	memcpy(hb_arena_base, src, region);
-	memcpy(b3_worlds, src + region, HB_WORLDS_BYTES);
-	return true;
-}
-
-DEFINE_PRIM(_BOOL, arena_init, _I32);
-DEFINE_PRIM(_I32, arena_used, _NO_ARG);
-DEFINE_PRIM(_I32, arena_save, _BYTES _I32);
-DEFINE_PRIM(_BOOL, arena_restore, _BYTES _I32);
+// The binding's own memory, from the world's region when there is one: see the regions below.
+static void *hb_mem_alloc(size_t size);
+static void *hb_mem_realloc(void *mem, size_t size);
+static void hb_mem_free(void *mem);
 
 #define _WORLD _ABSTRACT(hb_world)
 
@@ -229,6 +37,8 @@ DEFINE_PRIM(_BOOL, arena_restore, _BYTES _I32);
 // Table of eight-byte Box3D ids behind small integers. Freed slots are zeroed
 // and reused through a free list. Ids are copied with memcpy so one table
 // serves b3BodyId, b3ShapeId and b3JointId.
+typedef struct hb_arena_book hb_arena_book;
+
 typedef struct {
 	uint64_t *slots;
 	int *next;
@@ -296,7 +106,266 @@ typedef struct {
 	// last reported color per body, plus one so zero means unreported
 	uint32_t *colors;
 	int colorCap;
+	// the region every byte of this world lies in, see the regions below; NULL with none
+	hb_arena_book *arena;
 } hb_world;
+
+// ---- regions: every byte of a world in one region of memory, so that the world can be saved and put back whole ----
+//
+// Box3D takes an allocator. With one that hands out pieces of a region kept
+// for the world at hand, the whole state of that world - bodies, contacts,
+// the solver's warm starting, the id pools, the allocator's own books - lies
+// between the region's base and its used mark, and a copy of that is a
+// snapshot. Put back at the same addresses, every pointer inside is right
+// again: that is what a rollback is made of, and what Box3D on its own has
+// no way to give, since its state is spread over arrays it grows as it goes.
+//
+// Box3D's allocator is one for the process and takes no world, so the
+// binding says which world is at hand: every primitive given a world names
+// its region as current before Box3D is called, and Box3D's allocations
+// go there. What is made with no world at hand - hull, mesh and height
+// field data, shared between worlds - goes to the C library as before. A
+// free finds its region by the address, whatever is current.
+//
+// Pieces come in power-of-two classes, each with a sixteen-byte head that
+// says the class and the size asked for, off a free list a class or off the
+// end of the used part. Freed pieces go back on their class's list - the
+// link is written where the head was - so a snapshot's books are the books
+// of that moment. The head keeps the payload sixteen-aligned, which is what
+// Box3D asks. A lock guards the books: Box3D allocates from its tasks when
+// an arena of the solver's overflows.
+//
+// The binding's own tables of a world come from its region too, so that the
+// small numbers a Haxe body is known by roll back with the bodies; the
+// world's own struct here, which holds those tables' counts, goes into the
+// snapshot beside the region, as does the one thing of Box3D's that is not
+// in the region, its slot in the global array of worlds.
+//
+// A region does not grow: a world that outgrows it is an allocation that
+// fails, and Box3D stops on that. Its size is `arena_init`'s, for every
+// world made after; without that call there are no regions and no snapshots.
+#define HB_ARENA_HEAD 16
+#define HB_ARENA_CLASSES 40
+#define HB_ARENA_FIRST_CLASS 5
+#define HB_REGIONS 64
+
+struct hb_arena_book {
+	size_t used;
+	size_t cap;
+	char *free[HB_ARENA_CLASSES];
+};
+
+static hb_arena_book *hb_regions[HB_REGIONS];
+static int hb_region_count = 0;
+static size_t hb_region_default = 0;
+static hb_arena_book *hb_current = NULL;
+
+#ifdef _MSC_VER
+#include <intrin.h>
+static volatile long hb_arena_lock = 0;
+static void hb_arena_take(void) { while( _InterlockedExchange(&hb_arena_lock, 1) != 0 ) { } }
+static void hb_arena_give(void) { _InterlockedExchange(&hb_arena_lock, 0); }
+static void *hb_sys_aligned(size_t size) { return _aligned_malloc(size, 64); }
+static void hb_sys_aligned_free(void *mem) { _aligned_free(mem); }
+#else
+static volatile int hb_arena_lock = 0;
+static void hb_arena_take(void) { while( __sync_lock_test_and_set(&hb_arena_lock, 1) != 0 ) { } }
+static void hb_arena_give(void) { __sync_lock_release(&hb_arena_lock); }
+static void *hb_sys_aligned(size_t size) { return aligned_alloc(64, (size + 63) & ~(size_t)63); }
+static void hb_sys_aligned_free(void *mem) { free(mem); }
+#endif
+
+// The region a piece of memory lies in, or NULL for none.
+static hb_arena_book *hb_region_of(const void *mem) {
+	int i;
+	for( i = 0; i < hb_region_count; i++ ) {
+		const char *base = (const char*)hb_regions[i];
+		if( (const char*)mem >= base && (const char*)mem < base + hb_regions[i]->cap ) return hb_regions[i];
+	}
+	return NULL;
+}
+
+static int hb_arena_class(size_t size) {
+	size_t need = size + HB_ARENA_HEAD;
+	int c = HB_ARENA_FIRST_CLASS;
+	while( ((size_t)1 << c) < need && c < HB_ARENA_CLASSES - 1 ) c++;
+	return c;
+}
+
+static void *hb_arena_alloc(hb_arena_book *a, size_t size) {
+	int c = hb_arena_class(size);
+	size_t block = (size_t)1 << c;
+	char *p;
+	hb_arena_take();
+	p = a->free[c];
+	if( p != NULL ) {
+		a->free[c] = *(char**)p;
+	} else if( a->used + block <= a->cap ) {
+		p = (char*)a + a->used;
+		a->used += block;
+	}
+	hb_arena_give();
+	if( p == NULL ) return NULL;
+	((int32_t*)p)[0] = c;
+	((int32_t*)p)[1] = 0;
+	((size_t*)p)[1] = size;
+	return p + HB_ARENA_HEAD;
+}
+
+static void hb_arena_free(hb_arena_book *a, void *mem) {
+	char *p = (char*)mem - HB_ARENA_HEAD;
+	int c = ((int32_t*)p)[0];
+	hb_arena_take();
+	*(char**)p = a->free[c];
+	a->free[c] = p;
+	hb_arena_give();
+}
+
+static size_t hb_arena_size_of(const void *mem) {
+	return ((const size_t*)((const char*)mem - HB_ARENA_HEAD))[1];
+}
+
+// Box3D's allocator callbacks: the current region, or the C library with no world at hand or a region full.
+static void *hb_b3_alloc(int32_t size, int32_t alignment) {
+	(void)alignment;
+	if( hb_current != NULL ) {
+		void *p = hb_arena_alloc(hb_current, (size_t)size);
+		if( p != NULL ) return p;
+	}
+	return hb_sys_aligned((size_t)size);
+}
+
+static void hb_b3_free(void *mem) {
+	hb_arena_book *a;
+	if( mem == NULL ) return;
+	a = hb_region_of(mem);
+	if( a != NULL ) hb_arena_free(a, mem);
+	else hb_sys_aligned_free(mem);
+}
+
+// The binding's own memory: the current region when there is one, the C library otherwise.
+static void *hb_mem_alloc(size_t size) {
+	if( hb_current != NULL ) {
+		void *p = hb_arena_alloc(hb_current, size);
+		if( p != NULL ) return p;
+	}
+	return malloc(size);
+}
+
+static void hb_mem_free(void *mem) {
+	hb_arena_book *a;
+	if( mem == NULL ) return;
+	a = hb_region_of(mem);
+	if( a != NULL ) hb_arena_free(a, mem);
+	else free(mem);
+}
+
+static void *hb_mem_realloc(void *mem, size_t size) {
+	hb_arena_book *a = mem == NULL ? NULL : hb_region_of(mem);
+	void *grown;
+	size_t had;
+	if( a == NULL && hb_current == NULL ) return realloc(mem, size);
+	grown = hb_mem_alloc(size);
+	if( grown == NULL ) return NULL;
+	if( mem != NULL ) {
+		had = a != NULL ? hb_arena_size_of(mem) : size;
+		memcpy(grown, mem, had < size ? had : size);
+		hb_mem_free(mem);
+	}
+	return grown;
+}
+
+// A region made for a world: as many bytes as `arena_init` said. NULL with no regions wanted, or none left.
+static hb_arena_book *hb_region_make(void) {
+	hb_arena_book *a;
+	size_t book;
+	if( hb_region_default == 0 || hb_region_count >= HB_REGIONS ) return NULL;
+	a = (hb_arena_book*)hb_sys_aligned(hb_region_default);
+	if( a == NULL ) return NULL;
+	memset(a, 0, sizeof(hb_arena_book));
+	book = (sizeof(hb_arena_book) + 63) & ~(size_t)63;
+	a->used = book;
+	a->cap = hb_region_default;
+	hb_regions[hb_region_count++] = a;
+	return a;
+}
+
+static void hb_region_drop(hb_arena_book *a) {
+	int i;
+	if( a == NULL ) return;
+	for( i = 0; i < hb_region_count; i++ ) if( hb_regions[i] == a ) {
+		hb_regions[i] = hb_regions[--hb_region_count];
+		break;
+	}
+	hb_sys_aligned_free(a);
+}
+
+// The world at hand: its region takes Box3D's allocations until another is named.
+static void hb_use(hb_world *w) {
+	hb_current = w == NULL ? NULL : w->arena;
+}
+
+// Regions of so many bytes for every world made from now on, and Box3D pointed at the binding's allocator. Once;
+// a second call is true and does nothing. Before the worlds that are to be saved.
+HL_PRIM bool HL_NAME(arena_init)(int bytes) {
+	if( hb_region_default != 0 ) return true;
+	if( bytes < 1 << 16 ) return false;
+	hb_region_default = (size_t)bytes;
+	b3SetAllocator(hb_b3_alloc, hb_b3_free);
+	return true;
+}
+
+// The one thing of a world's that is not in its region: Box3D keeps the worlds themselves - the struct with every
+// array's pointer and count, the id pools' heads, the step's settings - in a global array.
+#include "physics_world.h"
+extern b3World b3_worlds[B3_MAX_WORLDS];
+#define HB_WORLD_SLOT(w) (&b3_worlds[(w)->id.index1 - 1])
+
+// Bytes a snapshot of the world is; nought for a world with no region.
+HL_PRIM int HL_NAME(world_snapshot_size)(hb_world *w) {
+	hb_use(w);
+	if( w == NULL || w->arena == NULL ) return 0;
+	return (int)(w->arena->used + sizeof(b3World) + sizeof(hb_world));
+}
+
+// The world copied out: its region's used part, its slot in Box3D's array of worlds, and its struct here. Returns
+// the bytes copied, or -1 when there is no region or `cap` is short. Between steps only: the copy is of a moment,
+// and a task writing meanwhile would leave a torn one.
+HL_PRIM int HL_NAME(world_save)(hb_world *w, vbyte *dst, int cap) {
+	hb_use(w);
+	size_t used;
+	if( w == NULL || w->arena == NULL ) return -1;
+	used = w->arena->used;
+	if( (size_t)cap < used + sizeof(b3World) + sizeof(hb_world) ) return -1;
+	memcpy(dst, w->arena, used);
+	memcpy(dst + used, HB_WORLD_SLOT(w), sizeof(b3World));
+	memcpy(dst + used + sizeof(b3World), w, sizeof(hb_world));
+	return (int)(used + sizeof(b3World) + sizeof(hb_world));
+}
+
+// A snapshot put back: the region's first bytes as they were, books and all, the world's slot and its struct.
+// What lies past the region's part is what was allocated after the snapshot, and the books put back know
+// nothing of it, which is right. Between steps only, and every body known on the Haxe side has to be read again.
+HL_PRIM bool HL_NAME(world_restore)(hb_world *w, vbyte *src, int len) {
+	hb_use(w);
+	size_t region;
+	hb_arena_book *arena;
+	if( w == NULL || w->arena == NULL || (size_t)len < sizeof(hb_arena_book) + sizeof(b3World) + sizeof(hb_world) ) return false;
+	region = (size_t)len - sizeof(b3World) - sizeof(hb_world);
+	if( region > w->arena->cap ) return false;
+	arena = w->arena;
+	memcpy(arena, src, region);
+	memcpy(HB_WORLD_SLOT(w), src + region, sizeof(b3World));
+	memcpy(w, src + region + sizeof(b3World), sizeof(hb_world));
+	w->arena = arena;
+	hb_use(w);
+	return true;
+}
+
+DEFINE_PRIM(_BOOL, arena_init, _I32);
+DEFINE_PRIM(_I32, world_snapshot_size, _WORLD);
+DEFINE_PRIM(_I32, world_save, _WORLD _BYTES _I32);
+DEFINE_PRIM(_BOOL, world_restore, _WORLD _BYTES _I32);
 
 // A zero word is the null id: a live id never has index1 == 0.
 static uint64_t pack_body(b3BodyId b) { uint64_t v = 0; memcpy(&v, &b, sizeof(b)); return v; }
@@ -426,9 +495,11 @@ static void debug_shape_gone(void *userShape, void *context) {
 // capacity: 5 slots or NULL: static shapes, dynamic shapes, static bodies,
 // dynamic bodies, contacts. Zero keeps the Box3D default.
 HL_PRIM hb_world *HL_NAME(world_create)(int max_bodies, int threads, vbyte *capacity) {
-	hb_world *w = (hb_world*)hb_mem_alloc(sizeof(hb_world));
+	hb_world *w = (hb_world*)malloc(sizeof(hb_world));
 	if( w == NULL ) return NULL;
 	memset(w, 0, sizeof(hb_world));
+	w->arena = hb_region_make();
+	hb_use(w);
 	hb_table_init(&w->bodies);
 	hb_table_init(&w->shapes);
 	hb_table_init(&w->joints);
@@ -450,7 +521,9 @@ HL_PRIM hb_world *HL_NAME(world_create)(int max_bodies, int threads, vbyte *capa
 	}
 	w->id = b3CreateWorld(&def);
 	if( !b3World_IsValid(w->id) ) {
-		hb_mem_free(w);
+		hb_use(NULL);
+		hb_region_drop(w->arena);
+		free(w);
 		return NULL;
 	}
 	(void)max_bodies;
@@ -458,6 +531,7 @@ HL_PRIM hb_world *HL_NAME(world_create)(int max_bodies, int threads, vbyte *capa
 }
 
 HL_PRIM void HL_NAME(world_destroy)(hb_world *w) {
+	hb_use(w);
 	if( w == NULL ) return;
 	b3DestroyWorld(w->id);
 	hb_mem_free(w->tags);
@@ -465,63 +539,77 @@ HL_PRIM void HL_NAME(world_destroy)(hb_world *w) {
 	hb_table_free(&w->bodies);
 	hb_table_free(&w->shapes);
 	hb_table_free(&w->joints);
-	hb_mem_free(w);
+	hb_use(NULL);
+	hb_region_drop(w->arena);
+	free(w);
 }
 
 // ---- world ----
 
 HL_PRIM void HL_NAME(world_set_gravity)(hb_world *w, double x, double y, double z) {
+	hb_use(w);
 	b3World_SetGravity(w->id, (b3Vec3){ (float)x, (float)y, (float)z });
 }
 
 // substeps < 1 uses the Box3D default of 4. Always returns 0.
 HL_PRIM int HL_NAME(world_step)(hb_world *w, double dt, int substeps) {
+	hb_use(w);
 	b3World_Step(w->id, (float)dt, substeps < 1 ? 4 : substeps);
 	return 0;
 }
 
 HL_PRIM void HL_NAME(world_optimize)(hb_world *w) {
+	hb_use(w);
 	b3World_RebuildStaticTree(w->id);
 }
 
 HL_PRIM void HL_NAME(world_enable_sleeping)(hb_world *w, bool allow) {
+	hb_use(w);
 	b3World_EnableSleeping(w->id, allow);
 }
 
 HL_PRIM int HL_NAME(world_active_count)(hb_world *w) {
+	hb_use(w);
 	return b3World_GetAwakeBodyCount(w->id);
 }
 
 HL_PRIM void HL_NAME(world_enable_continuous)(hb_world *w, bool on) {
+	hb_use(w);
 	b3World_EnableContinuous(w->id, on);
 }
 
 HL_PRIM void HL_NAME(world_enable_warm_starting)(hb_world *w, bool on) {
+	hb_use(w);
 	b3World_EnableWarmStarting(w->id, on);
 }
 
 // hertz, damping ratio, push-out speed in m/s
 HL_PRIM void HL_NAME(world_contact_tuning)(hb_world *w, double hertz, double damping, double speed) {
+	hb_use(w);
 	b3World_SetContactTuning(w->id, (float)hertz, (float)damping, (float)speed);
 }
 
 // closing speed in m/s
 HL_PRIM void HL_NAME(world_restitution_threshold)(hb_world *w, double speed) {
+	hb_use(w);
 	b3World_SetRestitutionThreshold(w->id, (float)speed);
 }
 
 // closing speed in m/s
 HL_PRIM void HL_NAME(world_hit_threshold)(hb_world *w, double speed) {
+	hb_use(w);
 	b3World_SetHitEventThreshold(w->id, (float)speed);
 }
 
 // m/s
 HL_PRIM void HL_NAME(world_max_speed)(hb_world *w, double speed) {
+	hb_use(w);
 	b3World_SetMaximumLinearSpeed(w->id, (float)speed);
 }
 
 // slots: position(3), radius, falloff, impulse per area
 HL_PRIM void HL_NAME(world_explode)(hb_world *w, vbyte *v) {
+	hb_use(w);
 	b3ExplosionDef def = b3DefaultExplosionDef();
 	def.position = p3(v, 0);
 	def.radius = ff(v, 3);
@@ -538,6 +626,7 @@ HL_PRIM void HL_NAME(world_explode)(hb_world *w, vbyte *v) {
 // motion locks(6), enable sleep, awake, bullet, enabled, fast rotation,
 // contact recycling. See BodyDef.hx.
 HL_PRIM int HL_NAME(world_add_body)(hb_world *w, vbyte *v, int motion) {
+	hb_use(w);
 	b3BodyDef def = b3DefaultBodyDef();
 	def.type = (b3BodyType)motion;
 	def.position = p3(v, 0);
@@ -569,6 +658,7 @@ HL_PRIM int HL_NAME(world_add_body)(hb_world *w, vbyte *v, int motion) {
 
 // Destroying a body destroys its shapes. Free their table slots first.
 HL_PRIM void HL_NAME(world_remove_body)(hb_world *w, int id) {
+	hb_use(w);
 	b3BodyId body = body_of(w, id);
 	if( !body_ok(body) ) return;
 	int count = b3Body_GetShapeCount(body);
@@ -589,12 +679,14 @@ HL_PRIM void HL_NAME(world_remove_body)(hb_world *w, int id) {
 }
 
 HL_PRIM bool HL_NAME(world_body_valid)(hb_world *w, int id) {
+	hb_use(w);
 	b3BodyId body = body_of(w, id);
 	return body_ok(body) && b3Body_IsValid(body);
 }
 
 // out: position(3), rotation(4)
 HL_PRIM void HL_NAME(world_get_transform)(hb_world *w, int id, vbyte *out) {
+	hb_use(w);
 	b3BodyId body = body_of(w, id);
 	if( !body_ok(body) ) {
 		memset(out, 0, 7 * 8);
@@ -613,6 +705,7 @@ HL_PRIM void HL_NAME(world_get_transform)(hb_world *w, int id, vbyte *out) {
 
 // slots: position(3), rotation(4)
 HL_PRIM void HL_NAME(world_set_transform)(hb_world *w, int id, vbyte *v) {
+	hb_use(w);
 	b3BodyId body = body_of(w, id);
 	if( !body_ok(body) ) return;
 	b3Body_SetTransform(body, p3(v, 0),
@@ -621,6 +714,7 @@ HL_PRIM void HL_NAME(world_set_transform)(hb_world *w, int id, vbyte *v) {
 
 // Kinematic target for the end of the step. slots: position(3), rotation(4), time step
 HL_PRIM void HL_NAME(world_set_target)(hb_world *w, int id, vbyte *v) {
+	hb_use(w);
 	b3BodyId body = body_of(w, id);
 	if( !body_ok(body) ) return;
 	b3WorldTransform target;
@@ -631,6 +725,7 @@ HL_PRIM void HL_NAME(world_set_target)(hb_world *w, int id, vbyte *v) {
 
 // out: linear velocity(3), angular velocity(3)
 HL_PRIM void HL_NAME(world_get_velocity)(hb_world *w, int id, vbyte *out) {
+	hb_use(w);
 	b3BodyId body = body_of(w, id);
 	if( !body_ok(body) ) {
 		memset(out, 0, 6 * 8);
@@ -641,6 +736,7 @@ HL_PRIM void HL_NAME(world_get_velocity)(hb_world *w, int id, vbyte *out) {
 }
 
 HL_PRIM void HL_NAME(world_set_velocity)(hb_world *w, int id, double x, double y, double z) {
+	hb_use(w);
 	b3BodyId body = body_of(w, id);
 	if( !body_ok(body) ) return;
 	b3Body_SetLinearVelocity(body, (b3Vec3){ (float)x, (float)y, (float)z });
@@ -648,6 +744,7 @@ HL_PRIM void HL_NAME(world_set_velocity)(hb_world *w, int id, double x, double y
 
 // rad/s
 HL_PRIM void HL_NAME(world_set_angular_velocity)(hb_world *w, int id, double x, double y, double z) {
+	hb_use(w);
 	b3BodyId body = body_of(w, id);
 	if( !body_ok(body) ) return;
 	b3Body_SetAngularVelocity(body, (b3Vec3){ (float)x, (float)y, (float)z });
@@ -655,6 +752,7 @@ HL_PRIM void HL_NAME(world_set_angular_velocity)(hb_world *w, int id, double x, 
 
 // quaternion x y z w, position unchanged
 HL_PRIM void HL_NAME(world_set_rotation)(hb_world *w, int id, double qx, double qy, double qz, double qw) {
+	hb_use(w);
 	b3BodyId body = body_of(w, id);
 	if( !body_ok(body) ) return;
 	b3Body_SetTransform(body, b3Body_GetPosition(body),
@@ -663,12 +761,14 @@ HL_PRIM void HL_NAME(world_set_rotation)(hb_world *w, int id, double qx, double 
 
 // slots: force(3), world point(3)
 HL_PRIM void HL_NAME(world_add_force)(hb_world *w, int id, vbyte *v) {
+	hb_use(w);
 	b3BodyId body = body_of(w, id);
 	if( !body_ok(body) ) return;
 	b3Body_ApplyForce(body, v3(v, 0), p3(v, 3), true);
 }
 
 HL_PRIM void HL_NAME(world_add_force_center)(hb_world *w, int id, double x, double y, double z) {
+	hb_use(w);
 	b3BodyId body = body_of(w, id);
 	if( !body_ok(body) ) return;
 	b3Body_ApplyForceToCenter(body, (b3Vec3){ (float)x, (float)y, (float)z }, true);
@@ -676,30 +776,35 @@ HL_PRIM void HL_NAME(world_add_force_center)(hb_world *w, int id, double x, doub
 
 // slots: impulse(3), world point(3)
 HL_PRIM void HL_NAME(world_add_impulse)(hb_world *w, int id, vbyte *v) {
+	hb_use(w);
 	b3BodyId body = body_of(w, id);
 	if( !body_ok(body) ) return;
 	b3Body_ApplyLinearImpulse(body, v3(v, 0), p3(v, 3), true);
 }
 
 HL_PRIM void HL_NAME(world_add_impulse_center)(hb_world *w, int id, double x, double y, double z) {
+	hb_use(w);
 	b3BodyId body = body_of(w, id);
 	if( !body_ok(body) ) return;
 	b3Body_ApplyLinearImpulseToCenter(body, (b3Vec3){ (float)x, (float)y, (float)z }, true);
 }
 
 HL_PRIM void HL_NAME(world_add_torque)(hb_world *w, int id, double x, double y, double z) {
+	hb_use(w);
 	b3BodyId body = body_of(w, id);
 	if( !body_ok(body) ) return;
 	b3Body_ApplyTorque(body, (b3Vec3){ (float)x, (float)y, (float)z }, true);
 }
 
 HL_PRIM void HL_NAME(world_add_angular_impulse)(hb_world *w, int id, double x, double y, double z) {
+	hb_use(w);
 	b3BodyId body = body_of(w, id);
 	if( !body_ok(body) ) return;
 	b3Body_ApplyAngularImpulse(body, (b3Vec3){ (float)x, (float)y, (float)z }, true);
 }
 
 HL_PRIM void HL_NAME(world_set_damping)(hb_world *w, int id, double linear, double angular) {
+	hb_use(w);
 	b3BodyId body = body_of(w, id);
 	if( !body_ok(body) ) return;
 	b3Body_SetLinearDamping(body, (float)linear);
@@ -707,6 +812,7 @@ HL_PRIM void HL_NAME(world_set_damping)(hb_world *w, int id, double linear, doub
 }
 
 HL_PRIM void HL_NAME(world_set_gravity_factor)(hb_world *w, int id, double factor) {
+	hb_use(w);
 	b3BodyId body = body_of(w, id);
 	if( !body_ok(body) ) return;
 	b3Body_SetGravityScale(body, (float)factor);
@@ -714,6 +820,7 @@ HL_PRIM void HL_NAME(world_set_gravity_factor)(hb_world *w, int id, double facto
 
 // bits 0-2 lock linear x y z, bits 3-5 lock angular x y z
 HL_PRIM void HL_NAME(world_set_locks)(hb_world *w, int id, int locks) {
+	hb_use(w);
 	b3BodyId body = body_of(w, id);
 	if( !body_ok(body) ) return;
 	b3MotionLocks m;
@@ -727,53 +834,62 @@ HL_PRIM void HL_NAME(world_set_locks)(hb_world *w, int id, int locks) {
 }
 
 HL_PRIM void HL_NAME(world_set_bullet)(hb_world *w, int id, bool on) {
+	hb_use(w);
 	b3BodyId body = body_of(w, id);
 	if( !body_ok(body) ) return;
 	b3Body_SetBullet(body, on);
 }
 
 HL_PRIM void HL_NAME(world_allow_fast_rotation)(hb_world *w, int id, bool on) {
+	hb_use(w);
 	b3BodyId body = body_of(w, id);
 	if( !body_ok(body) ) return;
 	b3Body_AllowFastRotation(body, on);
 }
 
 HL_PRIM void HL_NAME(world_allow_sleeping)(hb_world *w, int id, bool allow) {
+	hb_use(w);
 	b3BodyId body = body_of(w, id);
 	if( !body_ok(body) ) return;
 	b3Body_EnableSleep(body, allow);
 }
 
 HL_PRIM void HL_NAME(world_sleep_threshold)(hb_world *w, int id, double speed) {
+	hb_use(w);
 	b3BodyId body = body_of(w, id);
 	if( !body_ok(body) ) return;
 	b3Body_SetSleepThreshold(body, (float)speed);
 }
 
 HL_PRIM void HL_NAME(world_wake)(hb_world *w, int id, bool awake) {
+	hb_use(w);
 	b3BodyId body = body_of(w, id);
 	if( !body_ok(body) ) return;
 	b3Body_SetAwake(body, awake);
 }
 
 HL_PRIM bool HL_NAME(world_is_active)(hb_world *w, int id) {
+	hb_use(w);
 	b3BodyId body = body_of(w, id);
 	return body_ok(body) && b3Body_IsAwake(body);
 }
 
 HL_PRIM void HL_NAME(world_set_enabled)(hb_world *w, int id, bool on) {
+	hb_use(w);
 	b3BodyId body = body_of(w, id);
 	if( !body_ok(body) ) return;
 	if( on ) b3Body_Enable(body); else b3Body_Disable(body);
 }
 
 HL_PRIM void HL_NAME(world_set_motion_type)(hb_world *w, int id, int motion) {
+	hb_use(w);
 	b3BodyId body = body_of(w, id);
 	if( !body_ok(body) ) return;
 	b3Body_SetType(body, (b3BodyType)motion);
 }
 
 HL_PRIM double HL_NAME(world_get_mass)(hb_world *w, int id) {
+	hb_use(w);
 	b3BodyId body = body_of(w, id);
 	if( !body_ok(body) ) return 0.0;
 	return b3Body_GetMass(body);
@@ -781,6 +897,7 @@ HL_PRIM double HL_NAME(world_get_mass)(hb_world *w, int id) {
 
 // slots: mass, center(3), inertia diagonal(3)
 HL_PRIM void HL_NAME(world_set_mass)(hb_world *w, int id, vbyte *v) {
+	hb_use(w);
 	b3BodyId body = body_of(w, id);
 	if( !body_ok(body) ) return;
 	b3MassData m = b3Body_GetMassData(body);
@@ -793,6 +910,7 @@ HL_PRIM void HL_NAME(world_set_mass)(hb_world *w, int id, vbyte *v) {
 }
 
 HL_PRIM void HL_NAME(world_mass_from_shapes)(hb_world *w, int id) {
+	hb_use(w);
 	b3BodyId body = body_of(w, id);
 	if( !body_ok(body) ) return;
 	b3Body_ApplyMassFromShapes(body);
@@ -922,6 +1040,7 @@ static int shape_keep(hb_world *w, b3ShapeId s) {
 
 // slots: radius, center(3), settings
 HL_PRIM int HL_NAME(shape_sphere)(hb_world *w, int body, vbyte *v) {
+	hb_use(w);
 	b3BodyId b = body_of(w, body);
 	if( !body_ok(b) ) return NO_SLOT;
 	b3ShapeDef def = shape_def(v, 4);
@@ -931,6 +1050,7 @@ HL_PRIM int HL_NAME(shape_sphere)(hb_world *w, int body, vbyte *v) {
 
 // slots: center1(3), center2(3), radius, settings
 HL_PRIM int HL_NAME(shape_capsule)(hb_world *w, int body, vbyte *v) {
+	hb_use(w);
 	b3BodyId b = body_of(w, body);
 	if( !body_ok(b) ) return NO_SLOT;
 	b3ShapeDef def = shape_def(v, 7);
@@ -940,6 +1060,7 @@ HL_PRIM int HL_NAME(shape_capsule)(hb_world *w, int body, vbyte *v) {
 
 // slots: half extents(3), offset(3), rotation(4), settings. A box is a hull.
 HL_PRIM int HL_NAME(shape_box)(hb_world *w, int body, vbyte *v) {
+	hb_use(w);
 	b3BodyId b = body_of(w, body);
 	if( !body_ok(b) ) return NO_SLOT;
 	b3ShapeDef def = shape_def(v, 10);
@@ -952,6 +1073,7 @@ HL_PRIM int HL_NAME(shape_box)(hb_world *w, int body, vbyte *v) {
 
 // slots: settings. The shape references the hull; the caller keeps it alive.
 HL_PRIM int HL_NAME(shape_hull)(hb_world *w, int body, b3HullData *hull, vbyte *v) {
+	hb_use(w);
 	b3BodyId b = body_of(w, body);
 	if( !body_ok(b) || hull == NULL ) return NO_SLOT;
 	b3ShapeDef def = shape_def(v, 0);
@@ -960,6 +1082,7 @@ HL_PRIM int HL_NAME(shape_hull)(hb_world *w, int body, b3HullData *hull, vbyte *
 
 // slots: scale(3), settings, material count at 22, then mat4 per material, up to 64
 HL_PRIM int HL_NAME(shape_mesh)(hb_world *w, int body, b3MeshData *mesh, vbyte *v) {
+	hb_use(w);
 	b3BodyId b = body_of(w, body);
 	if( !body_ok(b) || mesh == NULL ) return NO_SLOT;
 	b3ShapeDef def = shape_def(v, 3);
@@ -975,6 +1098,7 @@ HL_PRIM int HL_NAME(shape_mesh)(hb_world *w, int body, b3MeshData *mesh, vbyte *
 }
 
 HL_PRIM void HL_NAME(shape_remove)(hb_world *w, int id, bool update_mass) {
+	hb_use(w);
 	b3ShapeId s = shape_of(w, id);
 	if( !shape_ok(s) ) return;
 	b3DestroyShape(s, update_mass);
@@ -983,6 +1107,7 @@ HL_PRIM void HL_NAME(shape_remove)(hb_world *w, int id, bool update_mass) {
 
 // body table index, or -1
 HL_PRIM int HL_NAME(shape_body)(hb_world *w, int id) {
+	hb_use(w);
 	b3ShapeId s = shape_of(w, id);
 	if( !shape_ok(s) ) return NO_SLOT;
 	return our_body(b3Shape_GetBody(s));
@@ -990,6 +1115,7 @@ HL_PRIM int HL_NAME(shape_body)(hb_world *w, int id) {
 
 HL_PRIM void HL_NAME(shape_material)(hb_world *w, int id, double friction, double restitution,
 		double rolling) {
+	hb_use(w);
 	b3ShapeId s = shape_of(w, id);
 	if( !shape_ok(s) ) return;
 	b3SurfaceMaterial m = b3Shape_GetSurfaceMaterial(s);
@@ -1001,6 +1127,7 @@ HL_PRIM void HL_NAME(shape_material)(hb_world *w, int id, double friction, doubl
 
 // tangent velocity in m/s
 HL_PRIM void HL_NAME(shape_conveyor)(hb_world *w, int id, double x, double y, double z) {
+	hb_use(w);
 	b3ShapeId s = shape_of(w, id);
 	if( !shape_ok(s) ) return;
 	b3SurfaceMaterial m = b3Shape_GetSurfaceMaterial(s);
@@ -1009,6 +1136,7 @@ HL_PRIM void HL_NAME(shape_conveyor)(hb_world *w, int id, double x, double y, do
 }
 
 HL_PRIM void HL_NAME(shape_set_density)(hb_world *w, int id, double density, bool update_mass) {
+	hb_use(w);
 	b3ShapeId s = shape_of(w, id);
 	if( !shape_ok(s) ) return;
 	b3Shape_SetDensity(s, (float)density, update_mass);
@@ -1016,23 +1144,27 @@ HL_PRIM void HL_NAME(shape_set_density)(hb_world *w, int id, double density, boo
 
 // Only affects a shape created as a sensor
 HL_PRIM void HL_NAME(shape_report_sensor)(hb_world *w, int id, bool on) {
+	hb_use(w);
 	b3ShapeId s = shape_of(w, id);
 	if( !shape_ok(s) ) return;
 	b3Shape_EnableSensorEvents(s, on);
 }
 
 HL_PRIM bool HL_NAME(shape_is_sensor)(hb_world *w, int id) {
+	hb_use(w);
 	b3ShapeId s = shape_of(w, id);
 	return shape_ok(s) && b3Shape_IsSensor(s);
 }
 
 HL_PRIM void HL_NAME(shape_report_contacts)(hb_world *w, int id, bool on) {
+	hb_use(w);
 	b3ShapeId s = shape_of(w, id);
 	if( !shape_ok(s) ) return;
 	b3Shape_EnableContactEvents(s, on);
 }
 
 HL_PRIM void HL_NAME(shape_report_hits)(hb_world *w, int id, bool on) {
+	hb_use(w);
 	b3ShapeId s = shape_of(w, id);
 	if( !shape_ok(s) ) return;
 	b3Shape_EnableHitEvents(s, on);
@@ -1040,6 +1172,7 @@ HL_PRIM void HL_NAME(shape_report_hits)(hb_world *w, int id, bool on) {
 
 // category and mask are 64-bit, see bits64
 HL_PRIM void HL_NAME(shape_filter)(hb_world *w, int id, double category, double mask, int group) {
+	hb_use(w);
 	b3ShapeId s = shape_of(w, id);
 	if( !shape_ok(s) ) return;
 	b3Filter f = b3Shape_GetFilter(s);
@@ -1051,6 +1184,7 @@ HL_PRIM void HL_NAME(shape_filter)(hb_world *w, int id, double category, double 
 
 // slots: wind(3), drag, lift, max speed
 HL_PRIM void HL_NAME(shape_wind)(hb_world *w, int id, vbyte *v) {
+	hb_use(w);
 	b3ShapeId s = shape_of(w, id);
 	if( !shape_ok(s) ) return;
 	b3Shape_ApplyWind(s, v3(v, 0), ff(v, 3), ff(v, 4), ff(v, 5), true);
@@ -1062,6 +1196,7 @@ HL_PRIM void HL_NAME(shape_wind)(hb_world *w, int id, vbyte *v) {
 
 // points: float triples. At least 4.
 HL_PRIM b3HullData *HL_NAME(hull_points)(vbyte *points, int count, int max_vertices) {
+	hb_use(NULL);
 	if( count < 4 ) return NULL;
 	return b3CreateHull((const b3Vec3*)points, count, max_vertices);
 }
@@ -1075,6 +1210,7 @@ HL_PRIM void HL_NAME(hull_destroy)(b3HullData *hull) {
 // vertex stride in bytes (zero is packed)
 HL_PRIM b3MeshData *HL_NAME(mesh_make)(vbyte *vertices, int vertex_count, vbyte *indices,
 		int triangle_count, vbyte *materials, vbyte *v) {
+	hb_use(NULL);
 	bool weld = on(v, 0), identify_edges = on(v, 1);
 	b3MeshDef def;
 	memset(&def, 0, sizeof(def));
@@ -1123,6 +1259,7 @@ HL_PRIM void HL_NAME(mesh_destroy)(b3MeshData *mesh) {
 // heights: floats, row by row. given: one material byte per cell or NULL.
 // slots: scale(3), min height, max height, clockwise winding
 HL_PRIM b3HeightFieldData *HL_NAME(hf_make)(vbyte *heights, int columns, int rows, vbyte *v, vbyte *given) {
+	hb_use(NULL);
 	if( columns < 2 || rows < 2 ) return NULL;
 	int cells = (columns - 1) * (rows - 1);
 	uint8_t *materials = (uint8_t*)calloc((size_t)cells, 1);
@@ -1144,10 +1281,12 @@ HL_PRIM b3HeightFieldData *HL_NAME(hf_make)(vbyte *heights, int columns, int row
 }
 
 HL_PRIM b3HeightFieldData *HL_NAME(hf_grid)(int rows, int columns, vbyte *v, bool holes) {
+	hb_use(NULL);
 	return b3CreateGrid(rows, columns, v3(v, 0), holes);
 }
 
 HL_PRIM b3HeightFieldData *HL_NAME(hf_wave)(int rows, int columns, vbyte *v, bool holes) {
+	hb_use(NULL);
 	return b3CreateWave(rows, columns, v3(v, 0), ff(v, 3), ff(v, 4), holes);
 }
 
@@ -1190,6 +1329,7 @@ HL_PRIM int HL_NAME(hf_triangles)(b3HeightFieldData *hf, vbyte *out, int max) {
 
 // Static bodies only. slots: settings, material count at 19, then mat4 per material, up to 64
 HL_PRIM int HL_NAME(shape_height_field)(hb_world *w, int body, b3HeightFieldData *hf, vbyte *v) {
+	hb_use(w);
 	b3BodyId b = body_of(w, body);
 	if( !body_ok(b) || hf == NULL ) return NO_SLOT;
 	b3ShapeDef def = shape_def(v, 0);
@@ -1276,6 +1416,7 @@ static b3QueryFilter query_filter(vbyte *v, int i) {
 // slots: origin(3), translation(3), category bits, mask bits
 // out: one hit, HIT_SLOTS. False and out untouched on a miss.
 HL_PRIM bool HL_NAME(world_ray)(hb_world *w, vbyte *v, vbyte *out) {
+	hb_use(w);
 	b3RayResult r = b3World_CastRayClosest(w->id, p3(v, 0),
 		v3(v, 3), query_filter(v, 6));
 	if( !r.hit ) return false;
@@ -1313,6 +1454,7 @@ static float ray_all_hit(b3ShapeId shape, b3Pos point, b3Vec3 normal, float frac
 }
 
 HL_PRIM int HL_NAME(world_ray_all)(hb_world *w, vbyte *v, vbyte *out, int max) {
+	hb_use(w);
 	ray_all_ctx c = { out, max, 0 };
 	w->stats = b3World_CastRay(w->id, p3(v, 0), v3(v, 3),
 		query_filter(v, 6), ray_all_hit, &c);
@@ -1345,6 +1487,7 @@ static bool overlap_hit(b3ShapeId shape, void *context) {
 }
 
 HL_PRIM int HL_NAME(world_overlap)(hb_world *w, vbyte *v, int count, vbyte *out, int max) {
+	hb_use(w);
 	overlap_ctx c = { out, max, 0 };
 	b3ShapeProxy proxy = make_proxy(v, 3, count);
 	w->stats = b3World_OverlapShape(w->id, p3(v, 0), &proxy,
@@ -1354,6 +1497,7 @@ HL_PRIM int HL_NAME(world_overlap)(hb_world *w, vbyte *v, int count, vbyte *out,
 
 // slots: lower bound(3), upper bound(3), category bits, mask bits
 HL_PRIM int HL_NAME(world_overlap_box)(hb_world *w, vbyte *v, vbyte *out, int max) {
+	hb_use(w);
 	overlap_ctx c = { out, max, 0 };
 	b3AABB box;
 	box.lowerBound = v3(v, 0);
@@ -1389,6 +1533,7 @@ static float cast_hit(b3ShapeId shape, b3Pos point, b3Vec3 normal, float fractio
 }
 
 HL_PRIM bool HL_NAME(world_cast)(hb_world *w, vbyte *v, int count, vbyte *out) {
+	hb_use(w);
 	cast_ctx c = { out, false, 1.0f };
 	b3ShapeProxy proxy = make_proxy(v, 3, count);
 	int after = 4 + count * 3;
@@ -1400,6 +1545,7 @@ HL_PRIM bool HL_NAME(world_cast)(hb_world *w, vbyte *v, int count, vbyte *out) {
 // Fraction of the move a capsule can make.
 // slots: origin(3), center1(3), center2(3), radius, translation(3), category bits, mask bits
 HL_PRIM double HL_NAME(world_cast_mover)(hb_world *w, vbyte *v) {
+	hb_use(w);
 	b3Capsule mover = { v3(v, 3), v3(v, 6), ff(v, 9) };
 	return b3World_CastMover(w->id, p3(v, 0), &mover,
 		v3(v, 10), query_filter(v, 13), NULL, NULL);
@@ -1441,6 +1587,7 @@ static bool mover_hit(b3ShapeId shape, const b3PlaneResult *planes, int count, v
 }
 
 HL_PRIM int HL_NAME(world_collide_mover)(hb_world *w, vbyte *v, vbyte *out, int max) {
+	hb_use(w);
 	mover_ctx c = { out, max, 0 };
 	b3Capsule mover = { v3(v, 3), v3(v, 6), ff(v, 9) };
 	b3World_CollideMover(w->id, p3(v, 0), &mover,
@@ -1483,6 +1630,7 @@ HL_PRIM void HL_NAME(mover_clip)(vbyte *velocity, vbyte *planes, int count, vbyt
 // Impulse from an immovable mover onto a dynamic body, as in the Box3D character sample.
 // slots: world point(3), normal(3), mover velocity(3)
 HL_PRIM void HL_NAME(world_push_from_mover)(hb_world *w, int shape, vbyte *v) {
+	hb_use(w);
 	b3ShapeId s = shape_of(w, shape);
 	if( !shape_ok(s) ) return;
 	b3BodyId body = b3Shape_GetBody(s);
@@ -1552,6 +1700,7 @@ static int joint_keep(hb_world *w, b3JointId j) {
 // slots: base, length, spring, hertz, damping ratio, limit, min length,
 // max length, motor, max motor force, motor speed
 HL_PRIM int HL_NAME(joint_distance)(hb_world *w, int a, int b, vbyte *v) {
+	hb_use(w);
 	b3DistanceJointDef def = b3DefaultDistanceJointDef();
 	joint_base(&def.base, w, a, b, v);
 	def.length = ff(v, 15);
@@ -1571,6 +1720,7 @@ HL_PRIM int HL_NAME(joint_distance)(hb_world *w, int a, int b, vbyte *v) {
 // slots: base, target angle, spring, hertz, damping ratio, limit, lower angle,
 // upper angle, motor, max motor torque, motor speed
 HL_PRIM int HL_NAME(joint_revolute)(hb_world *w, int a, int b, vbyte *v) {
+	hb_use(w);
 	b3RevoluteJointDef def = b3DefaultRevoluteJointDef();
 	joint_base(&def.base, w, a, b, v);
 	def.targetAngle = ff(v, 15);
@@ -1590,6 +1740,7 @@ HL_PRIM int HL_NAME(joint_revolute)(hb_world *w, int a, int b, vbyte *v) {
 // slots: base, spring, hertz, damping ratio, target translation, limit,
 // lower translation, upper translation, motor, max motor force, motor speed
 HL_PRIM int HL_NAME(joint_prismatic)(hb_world *w, int a, int b, vbyte *v) {
+	hb_use(w);
 	b3PrismaticJointDef def = b3DefaultPrismaticJointDef();
 	joint_base(&def.base, w, a, b, v);
 	def.enableSpring = on(v, 15);
@@ -1609,6 +1760,7 @@ HL_PRIM int HL_NAME(joint_prismatic)(hb_world *w, int a, int b, vbyte *v) {
 // cone angle, twist limit, lower twist, upper twist, motor, max motor torque,
 // motor velocity(3)
 HL_PRIM int HL_NAME(joint_spherical)(hb_world *w, int a, int b, vbyte *v) {
+	hb_use(w);
 	b3SphericalJointDef def = b3DefaultSphericalJointDef();
 	joint_base(&def.base, w, a, b, v);
 	def.enableSpring = on(v, 15);
@@ -1629,6 +1781,7 @@ HL_PRIM int HL_NAME(joint_spherical)(hb_world *w, int a, int b, vbyte *v) {
 // slots: base, linear hertz, angular hertz, linear damping ratio, angular damping ratio.
 // Zero hertz is rigid.
 HL_PRIM int HL_NAME(joint_weld)(hb_world *w, int a, int b, vbyte *v) {
+	hb_use(w);
 	b3WeldJointDef def = b3DefaultWeldJointDef();
 	joint_base(&def.base, w, a, b, v);
 	def.linearHertz = ff(v, 15);
@@ -1642,6 +1795,7 @@ HL_PRIM int HL_NAME(joint_weld)(hb_world *w, int a, int b, vbyte *v) {
 // max velocity torque, linear hertz, linear damping ratio, max spring force,
 // angular hertz, angular damping ratio, max spring torque
 HL_PRIM int HL_NAME(joint_motor)(hb_world *w, int a, int b, vbyte *v) {
+	hb_use(w);
 	b3MotorJointDef def = b3DefaultMotorJointDef();
 	joint_base(&def.base, w, a, b, v);
 	def.linearVelocity = v3(v, 15);
@@ -1662,6 +1816,7 @@ HL_PRIM int HL_NAME(joint_motor)(hb_world *w, int a, int b, vbyte *v) {
 // torque, spin speed, steering, steering hertz, steering damping ratio, target
 // steering angle, max steering torque, steering limit, lower steering, upper steering
 HL_PRIM int HL_NAME(joint_wheel)(hb_world *w, int a, int b, vbyte *v) {
+	hb_use(w);
 	b3WheelJointDef def = b3DefaultWheelJointDef();
 	joint_base(&def.base, w, a, b, v);
 	def.enableSuspensionSpring = on(v, 15);
@@ -1686,6 +1841,7 @@ HL_PRIM int HL_NAME(joint_wheel)(hb_world *w, int a, int b, vbyte *v) {
 
 // slots: base, hertz, damping ratio, max torque
 HL_PRIM int HL_NAME(joint_parallel)(hb_world *w, int a, int b, vbyte *v) {
+	hb_use(w);
 	b3ParallelJointDef def = b3DefaultParallelJointDef();
 	joint_base(&def.base, w, a, b, v);
 	def.hertz = ff(v, 15);
@@ -1696,12 +1852,14 @@ HL_PRIM int HL_NAME(joint_parallel)(hb_world *w, int a, int b, vbyte *v) {
 
 // Disables collision between the two bodies. slots: base
 HL_PRIM int HL_NAME(joint_filter)(hb_world *w, int a, int b, vbyte *v) {
+	hb_use(w);
 	b3FilterJointDef def = b3DefaultFilterJointDef();
 	joint_base(&def.base, w, a, b, v);
 	return joint_keep(w, b3CreateFilterJoint(w->id, &def));
 }
 
 HL_PRIM void HL_NAME(joint_remove)(hb_world *w, int id, bool wake) {
+	hb_use(w);
 	b3JointId j = joint_of(w, id);
 	if( !joint_ok(j) ) return;
 	b3DestroyJoint(j, wake);
@@ -1711,6 +1869,7 @@ HL_PRIM void HL_NAME(joint_remove)(hb_world *w, int id, bool wake) {
 // max_force is a torque for angular motors. No-op on a joint without a motor.
 HL_PRIM void HL_NAME(joint_set_motor)(hb_world *w, int id, bool enable, double speed,
 		double max_force) {
+	hb_use(w);
 	b3JointId j = joint_of(w, id);
 	if( !joint_ok(j) ) return;
 	switch( b3Joint_GetType(j) ) {
@@ -1746,6 +1905,7 @@ HL_PRIM void HL_NAME(joint_set_motor)(hb_world *w, int id, bool enable, double s
 // Weld sets both linear and angular; parallel and weld have no enable flag.
 HL_PRIM void HL_NAME(joint_set_spring)(hb_world *w, int id, bool enable, double hertz,
 		double damping) {
+	hb_use(w);
 	b3JointId j = joint_of(w, id);
 	if( !joint_ok(j) ) return;
 	switch( b3Joint_GetType(j) ) {
@@ -1792,6 +1952,7 @@ HL_PRIM void HL_NAME(joint_set_spring)(hb_world *w, int id, bool enable, double 
 // Units are the joint's own: radians for revolute, meters for distance, prismatic and wheel.
 HL_PRIM void HL_NAME(joint_set_limit)(hb_world *w, int id, bool enable, double lower,
 		double upper) {
+	hb_use(w);
 	b3JointId j = joint_of(w, id);
 	if( !joint_ok(j) ) return;
 	switch( b3Joint_GetType(j) ) {
@@ -1825,6 +1986,7 @@ HL_PRIM void HL_NAME(joint_set_limit)(hb_world *w, int id, bool enable, double l
 
 // distance: length, revolute: target angle, prismatic: target translation, wheel: steering angle
 HL_PRIM void HL_NAME(joint_set_target)(hb_world *w, int id, double value) {
+	hb_use(w);
 	b3JointId j = joint_of(w, id);
 	if( !joint_ok(j) ) return;
 	switch( b3Joint_GetType(j) ) {
@@ -1838,6 +2000,7 @@ HL_PRIM void HL_NAME(joint_set_target)(hb_world *w, int id, double value) {
 
 // Asymmetric twist limit for a spherical joint, radians
 HL_PRIM void HL_NAME(joint_set_twist)(hb_world *w, int id, double lower, double upper) {
+	hb_use(w);
 	b3JointId j = joint_of(w, id);
 	if( !joint_ok(j) || b3Joint_GetType(j) != b3_sphericalJoint ) return;
 	b3SphericalJoint_EnableTwistLimit(j, true);
@@ -1846,6 +2009,7 @@ HL_PRIM void HL_NAME(joint_set_twist)(hb_world *w, int id, double lower, double 
 
 // Joint event thresholds: force in N, torque in N*m. The joint does not break.
 HL_PRIM void HL_NAME(joint_set_threshold)(hb_world *w, int id, double force, double torque) {
+	hb_use(w);
 	b3JointId j = joint_of(w, id);
 	if( !joint_ok(j) ) return;
 	b3Joint_SetForceThreshold(j, (float)force);
@@ -1854,6 +2018,7 @@ HL_PRIM void HL_NAME(joint_set_threshold)(hb_world *w, int id, double force, dou
 
 // Motor joint only. slots: linear velocity(3), angular velocity(3)
 HL_PRIM void HL_NAME(joint_drive_velocity)(hb_world *w, int id, vbyte *v) {
+	hb_use(w);
 	b3JointId j = joint_of(w, id);
 	if( !joint_ok(j) || b3Joint_GetType(j) != b3_motorJoint ) return;
 	b3MotorJoint_SetLinearVelocity(j, v3(v, 0));
@@ -1863,6 +2028,7 @@ HL_PRIM void HL_NAME(joint_drive_velocity)(hb_world *w, int id, vbyte *v) {
 // Wheel joint only. Steering is a spring: zero hertz never reaches the angle.
 HL_PRIM void HL_NAME(joint_set_steering)(hb_world *w, int id, bool enable, double angle,
 		double max_torque, double hertz, double damping) {
+	hb_use(w);
 	b3JointId j = joint_of(w, id);
 	if( !joint_ok(j) || b3Joint_GetType(j) != b3_wheelJoint ) return;
 	b3WheelJoint_EnableSteering(j, enable);
@@ -1874,6 +2040,7 @@ HL_PRIM void HL_NAME(joint_set_steering)(hb_world *w, int id, bool enable, doubl
 
 // out: position, speed, constraint force, constraint torque, linear separation, angular separation
 HL_PRIM void HL_NAME(joint_read)(hb_world *w, int id, vbyte *out) {
+	hb_use(w);
 	b3JointId j = joint_of(w, id);
 	memset(out, 0, 6 * 8);
 	if( !joint_ok(j) ) return;
@@ -1976,6 +2143,7 @@ static b3Quat frame_from_axes(b3Vec3 z, b3Vec3 x) {
 }
 
 HL_PRIM void HL_NAME(joint_frames)(hb_world *w, int a, int b, vbyte *v, vbyte *out) {
+	hb_use(w);
 	b3BodyId ba = body_of(w, a);
 	b3BodyId bb = body_of(w, b);
 	b3Pos anchor = { ff(v, 0), ff(v, 1), ff(v, 2) };
@@ -2018,6 +2186,7 @@ DEFINE_PRIM(_VOID, joint_frames, _WORLD _I32 _I32 _BYTES _BYTES);
 // 13 user material id B (int), hits only
 // Only shapes with contact or hit events enabled report.
 HL_PRIM int HL_NAME(events_contacts)(hb_world *w, vbyte *out, int max) {
+	hb_use(w);
 	b3ContactEvents e = b3World_GetContactEvents(w->id);
 	int n = 0;
 	for( int i = 0; i < e.beginCount && n < max; i++, n++ ) {
@@ -2060,6 +2229,7 @@ HL_PRIM int HL_NAME(events_contacts)(hb_world *w, vbyte *out, int max) {
 // 2 visitor shape
 // 3 visitor body
 HL_PRIM int HL_NAME(events_sensors)(hb_world *w, vbyte *out, int max) {
+	hb_use(w);
 	b3SensorEvents e = b3World_GetSensorEvents(w->id);
 	int n = 0;
 	for( int i = 0; i < e.beginCount && n < max; i++, n++ ) {
@@ -2087,6 +2257,7 @@ HL_PRIM int HL_NAME(events_sensors)(hb_world *w, vbyte *out, int max) {
 // 4 rotation(4)
 // 8 fell asleep this step (int)
 HL_PRIM int HL_NAME(events_moved)(hb_world *w, vbyte *out, int max) {
+	hb_use(w);
 	b3BodyEvents e = b3World_GetBodyEvents(w->id);
 	int n = 0;
 	for( int i = 0; i < e.moveCount && n < max; i++, n++ ) {
@@ -2107,6 +2278,7 @@ HL_PRIM int HL_NAME(events_moved)(hb_world *w, vbyte *out, int max) {
 
 // Joints over their force or torque threshold, one int per slot
 HL_PRIM int HL_NAME(events_joints)(hb_world *w, vbyte *out, int max) {
+	hb_use(w);
 	b3JointEvents e = b3World_GetJointEvents(w->id);
 	int n = 0;
 	for( int i = 0; i < e.count && n < max; i++, n++ ) {
@@ -2238,6 +2410,7 @@ static void hull_tris(tri_ctx *c, const b3HullData *hull) {
 }
 
 HL_PRIM int HL_NAME(shape_triangles)(hb_world *w, int id, vbyte *out, int max) {
+	hb_use(w);
 	b3ShapeId s = shape_of(w, id);
 	if( !shape_ok(s) ) return 0;
 	tri_ctx c = { out, max, 0, { 0.0f, 0.0f, 0.0f } };
@@ -2291,6 +2464,7 @@ HL_PRIM int HL_NAME(shape_triangles)(hb_world *w, int id, vbyte *out, int max) {
 
 // out: center1(3), center2(3), radius. Both centers equal for a sphere. False for other types.
 HL_PRIM bool HL_NAME(shape_round)(hb_world *w, int id, vbyte *out) {
+	hb_use(w);
 	b3ShapeId s = shape_of(w, id);
 	if( !shape_ok(s) ) return false;
 	switch( b3Shape_GetType(s) ) {
@@ -2315,6 +2489,7 @@ HL_PRIM bool HL_NAME(shape_round)(hb_world *w, int id, vbyte *out) {
 
 // b3ShapeType, or -1
 HL_PRIM int HL_NAME(shape_type)(hb_world *w, int id) {
+	hb_use(w);
 	b3ShapeId s = shape_of(w, id);
 	if( !shape_ok(s) ) return -1;
 	return (int)b3Shape_GetType(s);
@@ -2333,6 +2508,7 @@ DEFINE_PRIM(_BOOL, shape_round, _WORLD _I32 _BYTES);
 #define _PLAYER _ABSTRACT(b3RecPlayer)
 
 HL_PRIM b3Recording *HL_NAME(rec_make)(int capacity) {
+	hb_use(NULL);
 	return b3CreateRecording(capacity);
 }
 
@@ -2369,10 +2545,12 @@ HL_PRIM bool HL_NAME(rec_validate)(b3Recording *r, int threads) {
 }
 
 HL_PRIM void HL_NAME(world_record)(hb_world *w, b3Recording *r) {
+	hb_use(w);
 	if( r != NULL ) b3World_StartRecording(w->id, r);
 }
 
 HL_PRIM void HL_NAME(world_stop_record)(hb_world *w) {
+	hb_use(w);
 	b3World_StopRecording(w->id);
 }
 
@@ -2762,6 +2940,7 @@ HL_PRIM int HL_NAME(compound_count)(b3CompoundData *c) {
 
 // Static bodies only. slots: settings
 HL_PRIM int HL_NAME(shape_compound)(hb_world *w, int body, b3CompoundData *c, vbyte *v) {
+	hb_use(w);
 	b3BodyId b = body_of(w, body);
 	if( !body_ok(b) || c == NULL ) return NO_SLOT;
 	b3ShapeDef def = shape_def(v, 0);
@@ -2803,12 +2982,14 @@ HL_PRIM int HL_NAME(mesh_material_indices)(b3MeshData *mesh, vbyte *out, int max
 }
 
 HL_PRIM int HL_NAME(shape_mesh_material_count)(hb_world *w, int id) {
+	hb_use(w);
 	b3ShapeId s = shape_of(w, id);
 	return shape_ok(s) ? b3Shape_GetMeshMaterialCount(s) : 0;
 }
 
 HL_PRIM void HL_NAME(shape_mesh_material)(hb_world *w, int id, int index, double friction,
 		double restitution, double rolling) {
+	hb_use(w);
 	b3ShapeId s = shape_of(w, id);
 	if( !shape_ok(s) || index < 0 || index >= b3Shape_GetMeshMaterialCount(s) ) return;
 	b3SurfaceMaterial m = b3Shape_GetMeshSurfaceMaterial(s, index);
@@ -2820,6 +3001,7 @@ HL_PRIM void HL_NAME(shape_mesh_material)(hb_world *w, int id, int index, double
 
 // out: world AABB, lower bound(3), upper bound(3)
 HL_PRIM void HL_NAME(shape_aabb)(hb_world *w, int id, vbyte *out) {
+	hb_use(w);
 	b3ShapeId s = shape_of(w, id);
 	if( !shape_ok(s) ) return;
 	b3AABB box = b3Shape_GetAABB(s);
@@ -2829,6 +3011,7 @@ HL_PRIM void HL_NAME(shape_aabb)(hb_world *w, int id, vbyte *out) {
 
 // m^3, computed as mass / density
 HL_PRIM double HL_NAME(shape_volume)(hb_world *w, int id) {
+	hb_use(w);
 	b3ShapeId s = shape_of(w, id);
 	if( !shape_ok(s) ) return 0.0;
 	float density = b3Shape_GetDensity(s);
@@ -2838,6 +3021,7 @@ HL_PRIM double HL_NAME(shape_volume)(hb_world *w, int id) {
 
 // Spherical joint only. slots: quaternion(4)
 HL_PRIM void HL_NAME(joint_set_target_rotation)(hb_world *w, int id, vbyte *v) {
+	hb_use(w);
 	b3JointId j = joint_of(w, id);
 	if( !joint_ok(j) || b3Joint_GetType(j) != b3_sphericalJoint ) return;
 	b3SphericalJoint_SetTargetRotation(j, (b3Quat){ v3(v, 0), ff(v, 3) });
@@ -2867,6 +3051,7 @@ enum {
 };
 
 HL_PRIM double HL_NAME(world_getf)(hb_world *w, int what) {
+	hb_use(w);
 	switch( what ) {
 	case WF_RESTITUTION_THRESHOLD: return b3World_GetRestitutionThreshold(w->id);
 	case WF_HIT_THRESHOLD: return b3World_GetHitEventThreshold(w->id);
@@ -2878,6 +3063,7 @@ HL_PRIM double HL_NAME(world_getf)(hb_world *w, int what) {
 }
 
 HL_PRIM void HL_NAME(world_setf)(hb_world *w, int what, double v) {
+	hb_use(w);
 	switch( what ) {
 	case WF_RESTITUTION_THRESHOLD: b3World_SetRestitutionThreshold(w->id, (float)v); break;
 	case WF_HIT_THRESHOLD: b3World_SetHitEventThreshold(w->id, (float)v); break;
@@ -2891,6 +3077,7 @@ HL_PRIM void HL_NAME(world_setf)(hb_world *w, int what, double v) {
 enum { WB_CONTINUOUS, WB_SLEEPING, WB_WARM_STARTING, WB_SPECULATIVE };
 
 HL_PRIM bool HL_NAME(world_getb)(hb_world *w, int what) {
+	hb_use(w);
 	switch( what ) {
 	case WB_CONTINUOUS: return b3World_IsContinuousEnabled(w->id);
 	case WB_SLEEPING: return b3World_IsSleepingEnabled(w->id);
@@ -2902,6 +3089,7 @@ HL_PRIM bool HL_NAME(world_getb)(hb_world *w, int what) {
 }
 
 HL_PRIM void HL_NAME(world_setb)(hb_world *w, int what, bool v) {
+	hb_use(w);
 	switch( what ) {
 	case WB_CONTINUOUS: b3World_EnableContinuous(w->id, v); break;
 	case WB_SLEEPING: b3World_EnableSleeping(w->id, v); break;
@@ -2912,11 +3100,13 @@ HL_PRIM void HL_NAME(world_setb)(hb_world *w, int what, bool v) {
 }
 
 HL_PRIM void HL_NAME(world_gravity)(hb_world *w, vbyte *out) {
+	hb_use(w);
 	put3(out, 0, b3World_GetGravity(w->id));
 }
 
 // out: lower bound(3), upper bound(3)
 HL_PRIM void HL_NAME(world_bounds)(hb_world *w, vbyte *out) {
+	hb_use(w);
 	b3AABB b = b3World_GetBounds(w->id);
 	put3(out, 0, b.lowerBound);
 	put3(out, 3, b.upperBound);
@@ -2924,6 +3114,7 @@ HL_PRIM void HL_NAME(world_bounds)(hb_world *w, vbyte *out) {
 
 // out: static shapes, dynamic shapes, static bodies, dynamic bodies, contacts
 HL_PRIM void HL_NAME(world_capacity)(hb_world *w, vbyte *out) {
+	hb_use(w);
 	b3Capacity c = b3World_GetMaxCapacity(w->id);
 	put(out, 0, c.staticShapeCount);
 	put(out, 1, c.dynamicShapeCount);
@@ -2934,6 +3125,7 @@ HL_PRIM void HL_NAME(world_capacity)(hb_world *w, vbyte *out) {
 
 // out: node visits, leaf visits of the last query
 HL_PRIM void HL_NAME(world_query_stats)(hb_world *w, vbyte *out) {
+	hb_use(w);
 	put(out, 0, w->stats.nodeVisits);
 	put(out, 1, w->stats.leafVisits);
 }
@@ -2941,6 +3133,7 @@ HL_PRIM void HL_NAME(world_query_stats)(hb_world *w, vbyte *out) {
 // out: 18 counters in b3Counters order, 24 graph color counts at 18,
 // manifold point count buckets at 42
 HL_PRIM void HL_NAME(world_counters)(hb_world *w, vbyte *out) {
+	hb_use(w);
 	b3Counters c = b3World_GetCounters(w->id);
 	put(out, 0, c.bodyCount);
 	put(out, 1, c.shapeCount);
@@ -2966,12 +3159,14 @@ HL_PRIM void HL_NAME(world_counters)(hb_world *w, vbyte *out) {
 
 // out: 23 b3Profile fields in declaration order, milliseconds
 HL_PRIM void HL_NAME(world_profile)(hb_world *w, vbyte *out) {
+	hb_use(w);
 	b3Profile p = b3World_GetProfile(w->id);
 	const float *f = &p.step;
 	for( int i = 0; i < 23; i++ ) put(out, i, f[i]);
 }
 
 HL_PRIM void HL_NAME(world_dump_memory)(hb_world *w) {
+	hb_use(w);
 	b3World_DumpMemoryStats(w->id);
 }
 
@@ -3005,6 +3200,7 @@ enum {
 };
 
 HL_PRIM double HL_NAME(body_getf)(hb_world *w, int id, int what) {
+	hb_use(w);
 	b3BodyId b = body_of(w, id);
 	if( !body_ok(b) ) return 0.0;
 	switch( what ) {
@@ -3022,6 +3218,7 @@ HL_PRIM double HL_NAME(body_getf)(hb_world *w, int id, int what) {
 }
 
 HL_PRIM void HL_NAME(body_setf)(hb_world *w, int id, int what, double v) {
+	hb_use(w);
 	b3BodyId b = body_of(w, id);
 	if( !body_ok(b) ) return;
 	switch( what ) {
@@ -3039,6 +3236,7 @@ enum {
 };
 
 HL_PRIM bool HL_NAME(body_getb)(hb_world *w, int id, int what) {
+	hb_use(w);
 	b3BodyId b = body_of(w, id);
 	if( !body_ok(b) ) return false;
 	switch( what ) {
@@ -3053,6 +3251,7 @@ HL_PRIM bool HL_NAME(body_getb)(hb_world *w, int id, int what) {
 }
 
 HL_PRIM void HL_NAME(body_setb)(hb_world *w, int id, int what, bool v) {
+	hb_use(w);
 	b3BodyId b = body_of(w, id);
 	if( !body_ok(b) ) return;
 	switch( what ) {
@@ -3072,6 +3271,7 @@ HL_PRIM void HL_NAME(body_setb)(hb_world *w, int id, int what, bool v) {
 enum { BV_LOCAL_CENTER, BV_WORLD_CENTER, BV_MAX_EXTENT, BV_MAX_EXTENT_ORIGIN, BV_LOCKS, BV_ROTATION, BV_INERTIA };
 
 HL_PRIM void HL_NAME(body_getv)(hb_world *w, int id, int what, vbyte *out) {
+	hb_use(w);
 	b3BodyId b = body_of(w, id);
 	if( !body_ok(b) ) return;
 	switch( what ) {
@@ -3111,6 +3311,7 @@ HL_PRIM void HL_NAME(body_getv)(hb_world *w, int id, int what, vbyte *out) {
 enum { BP_WORLD_POINT, BP_WORLD_VECTOR, BP_LOCAL_POINT_VELOCITY, BP_WORLD_POINT_VELOCITY };
 
 HL_PRIM void HL_NAME(body_point)(hb_world *w, int id, int kind, vbyte *v, vbyte *out) {
+	hb_use(w);
 	b3BodyId b = body_of(w, id);
 	if( !body_ok(b) ) return;
 	switch( kind ) {
@@ -3124,6 +3325,7 @@ HL_PRIM void HL_NAME(body_point)(hb_world *w, int id, int kind, vbyte *v, vbyte 
 
 // out: closest point(3). Returns the distance.
 HL_PRIM double HL_NAME(body_closest)(hb_world *w, int id, vbyte *v, vbyte *out) {
+	hb_use(w);
 	b3BodyId b = body_of(w, id);
 	if( !body_ok(b) ) return -1.0;
 	b3Vec3 result = { 0.0f, 0.0f, 0.0f };
@@ -3134,6 +3336,7 @@ HL_PRIM double HL_NAME(body_closest)(hb_world *w, int id, vbyte *v, vbyte *out) 
 
 // out: lower bound(3), upper bound(3)
 HL_PRIM void HL_NAME(body_aabb)(hb_world *w, int id, vbyte *out) {
+	hb_use(w);
 	b3BodyId b = body_of(w, id);
 	if( !body_ok(b) ) return;
 	b3AABB box = b3Body_ComputeAABB(b);
@@ -3142,6 +3345,7 @@ HL_PRIM void HL_NAME(body_aabb)(hb_world *w, int id, vbyte *out) {
 }
 
 HL_PRIM int HL_NAME(body_joints)(hb_world *w, int id, vbyte *out, int max) {
+	hb_use(w);
 	b3BodyId b = body_of(w, id);
 	if( !body_ok(b) ) return 0;
 	b3JointId ids[64];
@@ -3152,6 +3356,7 @@ HL_PRIM int HL_NAME(body_joints)(hb_world *w, int id, vbyte *out, int max) {
 }
 
 HL_PRIM int HL_NAME(body_shapes)(hb_world *w, int id, vbyte *out, int max) {
+	hb_use(w);
 	b3BodyId b = body_of(w, id);
 	if( !body_ok(b) ) return 0;
 	b3ShapeId ids[64];
@@ -3193,6 +3398,7 @@ static int manifolds_out(const b3ContactData *data, int count, vbyte *out, int m
 }
 
 HL_PRIM int HL_NAME(body_contacts)(hb_world *w, int id, vbyte *out, int max) {
+	hb_use(w);
 	b3BodyId b = body_of(w, id);
 	if( !body_ok(b) ) return 0;
 	b3ContactData data[64];
@@ -3203,6 +3409,7 @@ HL_PRIM int HL_NAME(body_contacts)(hb_world *w, int id, vbyte *out, int max) {
 }
 
 HL_PRIM int HL_NAME(shape_contacts)(hb_world *w, int id, vbyte *out, int max) {
+	hb_use(w);
 	b3ShapeId s = shape_of(w, id);
 	if( !shape_ok(s) ) return 0;
 	b3ContactData data[64];
@@ -3214,6 +3421,7 @@ HL_PRIM int HL_NAME(shape_contacts)(hb_world *w, int id, vbyte *out, int max) {
 
 // shapes overlapping a sensor, one int per slot
 HL_PRIM int HL_NAME(shape_visitors)(hb_world *w, int id, vbyte *out, int max) {
+	hb_use(w);
 	b3ShapeId s = shape_of(w, id);
 	if( !shape_ok(s) ) return 0;
 	int room = b3Shape_GetSensorCapacity(s);
@@ -3228,22 +3436,26 @@ HL_PRIM int HL_NAME(shape_visitors)(hb_world *w, int id, vbyte *out, int max) {
 
 // Box3D copies the string
 HL_PRIM void HL_NAME(body_set_name)(hb_world *w, int id, vbyte *name) {
+	hb_use(w);
 	b3BodyId b = body_of(w, id);
 	if( body_ok(b) ) b3Body_SetName(b, (const char*)name);
 }
 
 HL_PRIM vbyte *HL_NAME(body_get_name)(hb_world *w, int id) {
+	hb_use(w);
 	b3BodyId b = body_of(w, id);
 	const char *name = body_ok(b) ? b3Body_GetName(b) : NULL;
 	return (vbyte*)(name == NULL ? "" : name);
 }
 
 HL_PRIM void HL_NAME(shape_set_name)(hb_world *w, int id, vbyte *name) {
+	hb_use(w);
 	b3ShapeId s = shape_of(w, id);
 	if( shape_ok(s) ) b3Shape_SetName(s, (const char*)name);
 }
 
 HL_PRIM vbyte *HL_NAME(shape_get_name)(hb_world *w, int id) {
+	hb_use(w);
 	b3ShapeId s = shape_of(w, id);
 	const char *name = shape_ok(s) ? b3Shape_GetName(s) : NULL;
 	return (vbyte*)(name == NULL ? "" : name);
@@ -3260,6 +3472,7 @@ static void cast_out(vbyte *out, b3BodyCastResult r) {
 
 // slots: origin(3), translation(3), category bits, mask bits
 HL_PRIM bool HL_NAME(body_cast_ray)(hb_world *w, int id, vbyte *v, vbyte *out) {
+	hb_use(w);
 	b3BodyId b = body_of(w, id);
 	if( !body_ok(b) ) return false;
 	b3BodyCastResult r = b3Body_CastRay(b, p3(v, 0), v3(v, 3), query_filter(v, 6), 1.0f,
@@ -3270,6 +3483,7 @@ HL_PRIM bool HL_NAME(body_cast_ray)(hb_world *w, int id, vbyte *v, vbyte *out) {
 
 // slots: origin(3), point count, points(3 each), radius, translation(3), category bits, mask bits
 HL_PRIM bool HL_NAME(body_cast_shape)(hb_world *w, int id, vbyte *v, vbyte *out) {
+	hb_use(w);
 	b3BodyId b = body_of(w, id);
 	if( !body_ok(b) ) return false;
 	int count = (int)ff(v, 3);
@@ -3284,6 +3498,7 @@ HL_PRIM bool HL_NAME(body_cast_shape)(hb_world *w, int id, vbyte *v, vbyte *out)
 
 // slots: origin(3), point count, points(3 each), radius, category bits, mask bits
 HL_PRIM bool HL_NAME(body_overlap_shape)(hb_world *w, int id, vbyte *v) {
+	hb_use(w);
 	b3BodyId b = body_of(w, id);
 	if( !body_ok(b) ) return false;
 	int count = (int)ff(v, 3);
@@ -3303,6 +3518,7 @@ static b3WorldTransform wxf7(vbyte *v, int i) {
 
 // body_overlap_shape with the body at xf, 7 slots
 HL_PRIM bool HL_NAME(body_overlap_shape_at)(hb_world *w, int id, vbyte *v, vbyte *xf) {
+	hb_use(w);
 	b3BodyId b = body_of(w, id);
 	if( !body_ok(b) ) return false;
 	int count = (int)ff(v, 3);
@@ -3314,6 +3530,7 @@ HL_PRIM bool HL_NAME(body_overlap_shape_at)(hb_world *w, int id, vbyte *v, vbyte
 
 // world_collide_mover against one body, PLANE_SLOTS per plane, at most 32
 HL_PRIM int HL_NAME(body_collide_mover)(hb_world *w, int id, vbyte *v, vbyte *out, int max) {
+	hb_use(w);
 	b3BodyId b = body_of(w, id);
 	if( !body_ok(b) ) return 0;
 	b3BodyPlaneResult planes[32];
@@ -3329,6 +3546,7 @@ HL_PRIM int HL_NAME(body_collide_mover)(hb_world *w, int id, vbyte *v, vbyte *ou
 // out: fraction, point(3), normal(3), shape. Returns the fraction, 1 for no hit.
 // The body is stationary at its current transform.
 HL_PRIM double HL_NAME(body_toi_mover)(hb_world *w, int id, vbyte *v, vbyte *out) {
+	hb_use(w);
 	b3BodyId b = body_of(w, id);
 	if( !body_ok(b) ) return 1.0;
 	b3Capsule mover = { v3(v, 3), v3(v, 6), ff(v, 9) };
@@ -3344,6 +3562,7 @@ HL_PRIM double HL_NAME(body_toi_mover)(hb_world *w, int id, vbyte *v, vbyte *out
 
 // body_toi_mover with the body sweeping between two transforms in xf, 14 slots
 HL_PRIM double HL_NAME(body_toi_mover_sweep)(hb_world *w, int id, vbyte *v, vbyte *out, vbyte *xf) {
+	hb_use(w);
 	b3BodyId b = body_of(w, id);
 	if( !body_ok(b) ) return 1.0;
 	b3Capsule mover = { v3(v, 3), v3(v, 6), ff(v, 9) };
@@ -3358,6 +3577,7 @@ HL_PRIM double HL_NAME(body_toi_mover_sweep)(hb_world *w, int id, vbyte *v, vbyt
 
 // slots: origin(3), translation(3). out: fraction, point(3), normal(3), triangle index
 HL_PRIM bool HL_NAME(shape_ray_cast)(hb_world *w, int id, vbyte *v, vbyte *out) {
+	hb_use(w);
 	b3ShapeId s = shape_of(w, id);
 	if( !shape_ok(s) ) return false;
 	b3WorldCastOutput o = b3Shape_RayCast(s, p3(v, 0), v3(v, 3));
@@ -3369,6 +3589,7 @@ HL_PRIM bool HL_NAME(shape_ray_cast)(hb_world *w, int id, vbyte *v, vbyte *out) 
 }
 
 HL_PRIM void HL_NAME(shape_closest)(hb_world *w, int id, vbyte *v, vbyte *out) {
+	hb_use(w);
 	b3ShapeId s = shape_of(w, id);
 	if( !shape_ok(s) ) return;
 	put3(out, 0, b3Shape_GetClosestPoint(s, v3(v, 0)));
@@ -3406,6 +3627,7 @@ DEFINE_PRIM(_VOID, shape_closest, _WORLD _I32 _BYTES _BYTES);
 enum { SF_FRICTION, SF_RESTITUTION, SF_DENSITY, SF_CONTACT_CAPACITY, SF_SENSOR_CAPACITY, SF_MESH_MATERIALS };
 
 HL_PRIM double HL_NAME(shape_getf)(hb_world *w, int id, int what) {
+	hb_use(w);
 	b3ShapeId s = shape_of(w, id);
 	if( !shape_ok(s) ) return 0.0;
 	switch( what ) {
@@ -3420,6 +3642,7 @@ HL_PRIM double HL_NAME(shape_getf)(hb_world *w, int id, int what) {
 }
 
 HL_PRIM void HL_NAME(shape_setf)(hb_world *w, int id, int what, double v) {
+	hb_use(w);
 	b3ShapeId s = shape_of(w, id);
 	if( !shape_ok(s) ) return;
 	switch( what ) {
@@ -3433,6 +3656,7 @@ HL_PRIM void HL_NAME(shape_setf)(hb_world *w, int id, int what, double v) {
 enum { SB_CONTACT_EVENTS, SB_HIT_EVENTS, SB_PRESOLVE_EVENTS, SB_SENSOR_EVENTS, SB_SENSOR };
 
 HL_PRIM bool HL_NAME(shape_getb)(hb_world *w, int id, int what) {
+	hb_use(w);
 	b3ShapeId s = shape_of(w, id);
 	if( !shape_ok(s) ) return false;
 	switch( what ) {
@@ -3446,6 +3670,7 @@ HL_PRIM bool HL_NAME(shape_getb)(hb_world *w, int id, int what) {
 }
 
 HL_PRIM void HL_NAME(shape_setb)(hb_world *w, int id, int what, bool v) {
+	hb_use(w);
 	b3ShapeId s = shape_of(w, id);
 	if( !shape_ok(s) ) return;
 	switch( what ) {
@@ -3459,6 +3684,7 @@ HL_PRIM void HL_NAME(shape_setb)(hb_world *w, int id, int what, bool v) {
 
 // Geometry changed in place. slots: center(3), radius
 HL_PRIM void HL_NAME(shape_set_sphere)(hb_world *w, int id, vbyte *v) {
+	hb_use(w);
 	b3ShapeId s = shape_of(w, id);
 	if( !shape_ok(s) ) return;
 	b3Sphere sphere = { v3(v, 0), ff(v, 3) };
@@ -3467,6 +3693,7 @@ HL_PRIM void HL_NAME(shape_set_sphere)(hb_world *w, int id, vbyte *v) {
 
 // slots: center1(3), center2(3), radius
 HL_PRIM void HL_NAME(shape_set_capsule)(hb_world *w, int id, vbyte *v) {
+	hb_use(w);
 	b3ShapeId s = shape_of(w, id);
 	if( !shape_ok(s) ) return;
 	b3Capsule capsule = { v3(v, 0), v3(v, 3), ff(v, 6) };
@@ -3474,24 +3701,28 @@ HL_PRIM void HL_NAME(shape_set_capsule)(hb_world *w, int id, vbyte *v) {
 }
 
 HL_PRIM void HL_NAME(shape_set_hull)(hb_world *w, int id, b3HullData *hull) {
+	hb_use(w);
 	b3ShapeId s = shape_of(w, id);
 	if( shape_ok(s) && hull != NULL ) b3Shape_SetHull(s, hull);
 }
 
 // Box3D's shared hull, NULL unless a hull shape
 HL_PRIM b3HullData *HL_NAME(shape_get_hull)(hb_world *w, int id) {
+	hb_use(w);
 	b3ShapeId s = shape_of(w, id);
 	if( !shape_ok(s) || b3Shape_GetType(s) != b3_hullShape ) return NULL;
 	return (b3HullData*)b3Shape_GetHull(s);
 }
 
 HL_PRIM void HL_NAME(shape_set_mesh)(hb_world *w, int id, b3MeshData *mesh, vbyte *v) {
+	hb_use(w);
 	b3ShapeId s = shape_of(w, id);
 	if( shape_ok(s) && mesh != NULL ) b3Shape_SetMesh(s, mesh, v3(v, 0));
 }
 
 // slots: position(3), rotation(4), scale(3), settings
 HL_PRIM int HL_NAME(shape_hull_transformed)(hb_world *w, int body, b3HullData *hull, vbyte *v) {
+	hb_use(w);
 	b3BodyId b = body_of(w, body);
 	if( !body_ok(b) || hull == NULL ) return NO_SLOT;
 	b3ShapeDef def = shape_def(v, 10);
@@ -3543,6 +3774,7 @@ enum {
 };
 
 HL_PRIM double HL_NAME(joint_getf)(hb_world *w, int id, int what) {
+	hb_use(w);
 	b3JointId j = joint_of(w, id);
 	if( !joint_ok(j) ) return 0.0;
 	b3JointType type = b3Joint_GetType(j);
@@ -3674,6 +3906,7 @@ HL_PRIM double HL_NAME(joint_getf)(hb_world *w, int id, int what) {
 
 // codes without a Box3D setter are ignored
 HL_PRIM void HL_NAME(joint_setf)(hb_world *w, int id, int what, double v) {
+	hb_use(w);
 	b3JointId j = joint_of(w, id);
 	if( !joint_ok(j) ) return;
 	float x = (float)v, lo = 0.0f, hi = 0.0f, hertz = 0.0f, damping = 0.0f;
@@ -3753,6 +3986,7 @@ enum {
 };
 
 HL_PRIM bool HL_NAME(joint_getb)(hb_world *w, int id, int what) {
+	hb_use(w);
 	b3JointId j = joint_of(w, id);
 	if( what == JB_VALID ) return joint_ok(j) && b3Joint_IsValid(j);
 	if( !joint_ok(j) ) return false;
@@ -3782,6 +4016,7 @@ HL_PRIM bool HL_NAME(joint_getb)(hb_world *w, int id, int what) {
 }
 
 HL_PRIM void HL_NAME(joint_setb)(hb_world *w, int id, int what, bool v) {
+	hb_use(w);
 	b3JointId j = joint_of(w, id);
 	if( !joint_ok(j) ) return;
 	switch( what ) {
@@ -3817,6 +4052,7 @@ enum {
 };
 
 HL_PRIM void HL_NAME(joint_getv)(hb_world *w, int id, int what, vbyte *out) {
+	hb_use(w);
 	b3JointId j = joint_of(w, id);
 	if( !joint_ok(j) ) return;
 	b3JointType type = b3Joint_GetType(j);
@@ -3839,6 +4075,7 @@ HL_PRIM void HL_NAME(joint_getv)(hb_world *w, int id, int what, vbyte *out) {
 }
 
 HL_PRIM void HL_NAME(joint_setv)(hb_world *w, int id, int what, vbyte *v) {
+	hb_use(w);
 	b3JointId j = joint_of(w, id);
 	if( !joint_ok(j) ) return;
 	b3JointType type = b3Joint_GetType(j);
@@ -3855,6 +4092,7 @@ HL_PRIM void HL_NAME(joint_setv)(hb_world *w, int id, int what, vbyte *v) {
 
 // which: 0 frame A, 1 frame B. out: position(3), rotation(4)
 HL_PRIM void HL_NAME(joint_frame)(hb_world *w, int id, int which, vbyte *out) {
+	hb_use(w);
 	b3JointId j = joint_of(w, id);
 	if( !joint_ok(j) ) return;
 	b3Transform t = which == 0 ? b3Joint_GetLocalFrameA(j) : b3Joint_GetLocalFrameB(j);
@@ -3864,6 +4102,7 @@ HL_PRIM void HL_NAME(joint_frame)(hb_world *w, int id, int which, vbyte *out) {
 }
 
 HL_PRIM void HL_NAME(joint_set_frame)(hb_world *w, int id, int which, vbyte *v) {
+	hb_use(w);
 	b3JointId j = joint_of(w, id);
 	if( !joint_ok(j) ) return;
 	b3Transform t = { v3(v, 0), { v3(v, 3), ff(v, 6) } };
@@ -3871,12 +4110,14 @@ HL_PRIM void HL_NAME(joint_set_frame)(hb_world *w, int id, int which, vbyte *v) 
 }
 
 HL_PRIM void HL_NAME(joint_wake)(hb_world *w, int id) {
+	hb_use(w);
 	b3JointId j = joint_of(w, id);
 	if( joint_ok(j) ) b3Joint_WakeBodies(j);
 }
 
 // b3JointType, or -1
 HL_PRIM int HL_NAME(joint_kind)(hb_world *w, int id) {
+	hb_use(w);
 	b3JointId j = joint_of(w, id);
 	return joint_ok(j) ? (int)b3Joint_GetType(j) : -1;
 }
@@ -4327,6 +4568,7 @@ static float restitution_rule(float a, uint64_t ia, float b, uint64_t ib) {
 
 // which: 0 friction, 1 restitution. rule: MIX_ enum. Box3D defaults are geometric and max.
 HL_PRIM void HL_NAME(world_mix_rule)(hb_world *w, int which, int rule) {
+	hb_use(w);
 	if( which == 0 ) {
 		g_friction_rule = rule;
 		b3World_SetFrictionCallback(w->id, friction_rule);
@@ -4382,6 +4624,7 @@ static bool presolve_rule(b3ShapeId a, b3ShapeId b, b3Pos point, b3Vec3 normal, 
 
 // slots: direction(3), threshold
 HL_PRIM void HL_NAME(world_presolve_rule)(hb_world *w, int rule, vbyte *v) {
+	hb_use(w);
 	w->presolveRule = rule;
 	w->presolveDir = v3(v, 0);
 	w->presolveThreshold = ff(v, 3);
@@ -4409,11 +4652,13 @@ static bool filter_rule(b3ShapeId a, b3ShapeId b, void *context) {
 }
 
 HL_PRIM void HL_NAME(world_filter_rule)(hb_world *w, int rule) {
+	hb_use(w);
 	w->filterRule = rule;
 	b3World_SetCustomFilterCallback(w->id, filter_rule, w);
 }
 
 HL_PRIM void HL_NAME(shape_set_tag)(hb_world *w, int id, int tag) {
+	hb_use(w);
 	if( id < 0 ) return;
 	if( id >= w->tagCount ) {
 		int cap = w->tagCount == 0 ? 64 : w->tagCount;
@@ -4428,6 +4673,7 @@ HL_PRIM void HL_NAME(shape_set_tag)(hb_world *w, int id, int tag) {
 }
 
 HL_PRIM int HL_NAME(shape_get_tag)(hb_world *w, int id) {
+	hb_use(w);
 	return id < 0 || id >= w->tagCount ? 0 : w->tags[id];
 }
 
@@ -4536,6 +4782,7 @@ static void dbg_shape(void *shape, b3WorldTransform t, b3HexColor color, void *c
 // flags: DD_ bits. v: joint scale, force scale, eye(3), half extent of the drawing box, or NULL.
 // Returns segments written.
 HL_PRIM int HL_NAME(world_debug_lines)(hb_world *w, int flags, vbyte *v, vbyte *out, int max) {
+	hb_use(w);
 	seg_ctx c = { out, max, 0 };
 	b3DebugDraw draw = b3DefaultDebugDraw();
 	draw.DrawShapeFcn = dbg_shape;
@@ -4615,6 +4862,7 @@ static void col_shape(void *userShape, b3WorldTransform t, b3HexColor color, voi
 
 // all: report every body, not only changes
 HL_PRIM int HL_NAME(world_body_colors)(hb_world *w, vbyte *out, int max, bool all) {
+	hb_use(w);
 	col_ctx c = { w, out, max, 0, all };
 	b3DebugDraw draw = b3DefaultDebugDraw();
 	draw.DrawShapeFcn = col_shape;
@@ -4655,6 +4903,7 @@ static void lbl_string(b3Pos p, const char *s, b3HexColor color, void *context) 
 }
 
 HL_PRIM int HL_NAME(world_debug_labels)(hb_world *w, int flags, vbyte *out, int max) {
+	hb_use(w);
 	label_ctx c = { out, max, 0 };
 	b3DebugDraw draw = b3DefaultDebugDraw();
 	draw.DrawStringFcn = lbl_string;

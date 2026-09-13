@@ -14,8 +14,8 @@ the middle.
 box3d.World.arena();                 // once, before the first world
 var world = new box3d.World();
 // ... build, play ...
-var image = haxe.io.Bytes.alloc(box3d.World.arenaUsed() + 65536);
-var length = box3d.World.save(image);
+var image = haxe.io.Bytes.alloc(world.snapshotSize() + 65536);
+var length = world.save(image);
 // ... play on ...
 world.restore(image, length);        // back to the moment of the save
 ```
@@ -26,12 +26,13 @@ Box3D grows its state as it goes, over arrays it allocates when it
 needs them: bodies and their shapes, contacts and their manifolds, the
 solver's warm starting, the id pools. There is no way to ask it for all
 of that. So the module gives Box3D an allocator of its own instead, one
-that hands out pieces of a single region of memory, and every byte
-Box3D holds lies in that region from then on. A snapshot is the region's
-used part copied out, along with the one thing of a world's that is not
-in it, Box3D's own array of worlds. Put back at the same addresses,
-every pointer inside is right again, the allocator's own books among
-them.
+that hands out pieces of a region kept for the world at hand — every
+primitive given a world names it first — and every byte of the world
+lies in its region from then on. A snapshot is the region's used part
+copied out, along with the little of the world that is not in it: its
+slot in Box3D's own array of worlds, and the module's own record of it.
+Put back at the same addresses, every pointer inside is right again,
+the allocator's own books among them.
 
 Since every pointer is the same and every byte is the same, the world
 put back is not close to the one saved but identical, and Box3D being
@@ -40,17 +41,18 @@ steps.
 
 ## What to know
 
-- **Before the first world.** `World.arena` has to come before any
-  world is made: what Box3D allocated before it lies outside the region
-  and cannot be saved. A second call changes nothing.
-- **The region is of every world.** There is one allocator for the
-  process, so a snapshot holds every world in it, and putting one back
-  puts them all back. A game has one world; the checks make theirs one
-  at a time.
-- **The region does not grow.** It is as many bytes as `arena` was
-  given, sixty-four megabytes if not said. A world that outgrows it is
-  an allocation that fails, and Box3D stops on that. A world of a few
-  dozen bodies is a couple of megabytes.
+- **Before the world.** `World.arena` has to come before the world is
+  made: a world made before it has no region and cannot be saved. A
+  second call changes nothing.
+- **A region a world.** Each world made after `arena` has a region of
+  its own, and a snapshot is of that world alone. What is made with no
+  world at hand — hull, mesh and height field data — is shared between
+  worlds and lies outside them.
+- **A region does not grow.** It is as many bytes as `arena` was
+  given, sixty-four megabytes if not said, of which only the used part
+  is ever touched. A world that outgrows it is an allocation that fails,
+  and Box3D stops on that. A world of a few dozen bodies is a couple of
+  megabytes.
 - **Between steps.** Save and restore while no step is running: a
   snapshot taken during a step, with the tasks writing, would be torn.
 - **The same bodies.** `restore` reads every body the world knows again,
@@ -69,11 +71,11 @@ steps.
 
 ## Reference
 
-- `World.arena(bytes = 64 MB) : Bool` — every byte of Box3D in one
-  region from now on. Before any world. Once.
-- `World.arenaUsed() : Int` — the size of a snapshot now; nought without
-  a region.
-- `World.save(into : haxe.io.Bytes) : Int` — the snapshot into the
-  bytes, which must hold `arenaUsed()`; the length, or -1.
+- `World.arena(bytes = 64 MB) : Bool` — a region of so many bytes for
+  every world made from now on. Once.
+- `world.snapshotSize() : Int` — the size of a snapshot of this world now;
+  nought for a world with no region.
+- `world.save(into : haxe.io.Bytes) : Int` — the snapshot into the bytes,
+  which must hold `snapshotSize()`; the length, or -1.
 - `world.restore(image : haxe.io.Bytes, length : Int) : Bool` — the
   snapshot put back, and this world's bodies read again.
